@@ -1,0 +1,10 @@
+invsee for Horizon is a port of InvSee++ by Jannyboy11 (Jan Boerman, package com.janboerman.invsee).
+
+Original project: https://github.com/Jannyboy11/InvSee-plus-plus
+Original licence: GNU Lesser General Public License v2.1 (LGPL-2.1), text in LICENSE
+(copied from the original's LICENSE.txt, which states the change to LGPLv2.1 in version 0.15.4).
+
+The original source has no copyright line of its own; its author is named in plugin.yml as Jannyboy11.
+The copyright in the original InvSee++ code stays with its authors. The port's changes are by the
+Horizon port's authors (Detimes) and are distributed under the same LGPL-2.1 licence, because they
+derive from the original.

@@ -1,0 +1,179 @@
+# invsee: /invsee and /endersee for Horizon servers (players online and offline, live edits).
+# Needs Horizon's server menus (API 10) and player inventories (API 132): "hooks": 397 or later
+# for the config hooks. The slot, profile, permission and command-refresh helpers are pending API
+# fragments (set_inventory_slot, profile_cache, permission_check, refresh_commands): the bundle
+# needs the stamped number of the highest of them in "hooks" once `stamp_native_hooks.py` has run.
+[mod]
+id = "invsee"
+version = "0.1.0"
+priority = 100
+
+[compatibility]
+# The live inventory menu needs Horizon branch `hooks-b-all` (`native_open_inventory_menu`, not
+# merged upstream yet); was a589a3dd9be04fa7f17667c0175711aaa92e1147.
+horizon_revision = "ef66a2db57134f7065de0a5c417157cbec6802d0"
+
+# Sessions, click rules, templates, name lookup and the change log (no game types).
+[[crate]]
+id = "core"
+path = "core"
+dependent = "horizon-client"
+
+# The game side: the Host the crate drives, over Horizon's menu and inventory helpers.
+[[module]]
+id = "glue"
+file = "crates/horizon-client/src/game.rs"
+name = "invsee_glue"
+source = "glue.rs"
+
+# config/invsee-server.toml, written from the default when missing, reloaded when it changes.
+[[injection]]
+id = "register-config"
+hook = "register_configs"
+hook_version = 1
+kind = "HEAD"
+helper = "register_config.rs"
+bindings = [
+  { name = "list", ty = "&mut Vec<crate::game::native_configs::NativeConfig>", value = "&mut *configs" },
+]
+
+[[injection]]
+id = "config-loading"
+hook = "config_loading"
+hook_version = 1
+kind = "HEAD"
+helper = "config_loading.rs"
+bindings = [
+  { name = "file", ty = "&crate::game::native_configs::NativeConfigFile", value = "config" },
+]
+
+[[injection]]
+id = "config-reloading"
+hook = "config_reloading"
+hook_version = 1
+kind = "HEAD"
+helper = "config_reloading.rs"
+bindings = [
+  { name = "file", ty = "&crate::game::native_configs::NativeConfigFile", value = "config" },
+]
+
+# /invsee, /endersee, their aliases and the reload command, by operator level.
+[[injection]]
+id = "register-commands"
+hook = "register_commands"
+hook_version = 1
+kind = "HEAD"
+helper = "register_commands.rs"
+bindings = [
+  { name = "commands", ty = "&mut Vec<horizon_client::mod_api::NativeCommand>", value = "commands" },
+]
+
+[[injection]]
+id = "perform-command"
+hook = "perform_command"
+hook_version = 1
+kind = "HEAD"
+helper = "perform_command.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "player", ty = "&horizon_client::mod_api::NativeServerPlayer", value = "player" },
+  { name = "command", ty = "&str", value = "command" },
+  { name = "ran", ty = "&mut bool", value = "ran" },
+]
+
+[[injection]]
+id = "console-command"
+hook = "perform_console_command"
+hook_version = 1
+kind = "HEAD"
+helper = "console_command.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "command", ty = "&str", value = "command" },
+  { name = "ran", ty = "&mut bool", value = "ran" },
+]
+
+# Opens pending views, follows open views' inventories, polls Mojang lookups.
+[[injection]]
+id = "server-tick"
+hook = "server_tick"
+hook_version = 1
+kind = "HEAD"
+helper = "server_tick.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "phase", ty = "horizon_client::mod_api::ServerTickPhase", value = "phase" },
+]
+
+# Clicks on and closing of the views (no click moves anything by itself).
+[[injection]]
+id = "menu-clicked"
+hook = "menu_clicked"
+hook_version = 1
+kind = "HEAD"
+helper = "menu_clicked.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "uuid", ty = "u128", value = "uuid" },
+  { name = "window", ty = "i32", value = "window" },
+  { name = "slot", ty = "i32", value = "slot" },
+  { name = "button", ty = "i32", value = "button" },
+  { name = "mode", ty = "i32", value = "mode" },
+]
+
+[[injection]]
+id = "menu-closed"
+hook = "menu_closed"
+hook_version = 1
+kind = "HEAD"
+helper = "menu_closed.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "uuid", ty = "u128", value = "uuid" },
+  { name = "window", ty = "i32", value = "window" },
+]
+
+# Names of players who were on, for offline lookups and completion.
+[[injection]]
+id = "logged-in"
+hook = "player_logged_in"
+hook_version = 1
+kind = "HEAD"
+helper = "logged_in.rs"
+bindings = [
+  { name = "player", ty = "u128", value = "player" },
+  { name = "name", ty = "&str", value = "name" },
+]
+
+[[injection]]
+id = "logged-out"
+hook = "player_logged_out"
+hook_version = 1
+kind = "HEAD"
+helper = "logged_out.rs"
+bindings = [
+  { name = "player", ty = "u128", value = "player" },
+  { name = "name", ty = "&str", value = "name" },
+]
+
+# Name completion (only reached when the client asks the server).
+[[injection]]
+id = "tab-complete"
+hook = "tab_complete"
+hook_version = 1
+kind = "HEAD"
+helper = "tab_complete.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "player", ty = "u128", value = "player" },
+  { name = "command", ty = "&str", value = "command" },
+  { name = "suggestions", ty = "&mut Vec<horizon_client::mod_api::Suggestion>", value = "&mut *suggestions" },
+]
+
+[[injection]]
+id = "stopping"
+hook = "server_stopping"
+hook_version = 1
+kind = "HEAD"
+helper = "stopping.rs"
+bindings = [{ name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" }]
