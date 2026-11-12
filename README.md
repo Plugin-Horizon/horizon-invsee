@@ -1,14 +1,24 @@
 # invsee for Horizon
 
-> **Unofficial Rust port of InvSee++ for the Horizon server (https://github.com/horizon-rust/horizon). Not affiliated with or endorsed by the InvSee++ authors.**
+> **Unofficial Rust port of InvSee++ for the Horizon server (https://github.com/arismoko/horizon). Not affiliated with or endorsed by the InvSee++ authors.**
 
-A native mod for [Horizon](https://github.com/horizon-rust/horizon) servers: operators open another player's
+A native mod for [Horizon](https://github.com/arismoko/horizon) servers: operators open another player's
 inventory or ender chest as a chest view, whether that player is online or not, and take items out or put items in.
 It is a port of the Bukkit plugin InvSee++ for Horizon.
 
 **Derived from InvSee++** (<https://github.com/Jannyboy11/InvSee-plus-plus>, LGPL-2.1, by Jannyboy11). The commands,
 messages, defaults, placeholders and log formats follow its source; the authors and the licence are in
 [NOTICE](NOTICE) and [LICENSE](LICENSE). It is not affiliated with InvSee++ or its author.
+
+> **Built for and working only with [arismoko/horizon](https://github.com/arismoko/horizon)** (the Horizon fork that carries the mod API). [horizon-rust/horizon](https://github.com/horizon-rust/horizon) is experimental for mods and not supported: the earlier version for its native hooks / horizon-mixins is frozen on the `horizon-plain` branch (work stopped on 2026-11-12).
+
+## Which Horizon
+
+This is a native trait mod: `horizon-mod.toml`, a `Cargo.toml` that depends on `horizon-mod-api`, `src/lib.rs` with the hooks, and the plugin logic in the `core/` crate (plain Rust, no engine needed for its tests).
+
+- Pin: `[native] horizon = "54090ee36c4e2c7b43b66db864220c577b94b7e0"` in `horizon-mod.toml` (game `26.3`). That is a development build of arismoko/horizon `main` plus mod API additions that are not all merged upstream yet, so a stock `main` may lack some host methods this mod calls until they land.
+- It compiled and loaded on that build and was smoke-tested there; it has not seen a long run with real players. Treat it as experimental.
+- Feature descriptions below were written for the earlier horizon-rust version; where they name engine calls (`native_*`) or old file paths, read them as descriptions only. The Known gaps list is current.
 
 ## Commands
 
@@ -33,7 +43,7 @@ whose stack changed does nothing and says why.
 ## Configuration
 
 `config/invsee-server.toml`, written with all defaults and comments on the first start, reloaded by the game when
-it changes (see [`mixins/invsee/core/invsee-server.toml`](mixins/invsee/core/invsee-server.toml)):
+it changes (see [`core/invsee-server.toml`](core/invsee-server.toml)):
 
 - `[access]`: operator level per action, `exempt_invsee` / `exempt_endersee` (names or UUIDs) and `bypass_exempt`.
 - `[players]`: offline and never-played players, name lookup order (`online`, `logged_out`, `usercache`, `mojang`,
@@ -51,7 +61,7 @@ tree.
 
 ## Differences from InvSee++
 
-See [STATUS.md](STATUS.md) for the full list and [GAPS.md](GAPS.md) for what Horizon would need. In short: whole-stack
+See the Known gaps section for the full list and the Known gaps section for what Horizon would need. In short: whole-stack
 clicks (plus split and armour placement) instead of a free cursor, the cursor and crafting grid slots are shown as
 unavailable, and a never-played player's view is read-only.
 
@@ -60,24 +70,23 @@ overwrite changes made to an offline player's file.
 
 ## Build
 
-The bundle is `mixins/invsee/`: `horizon-mixin.toml`, one helper per hook, a support module (`glue.rs`) and the crate
-`core/` with all logic (no game types). It needs Horizon at `a589a3dd9` or later (server menus, API 10; player
-inventories, API 132; mod configs, API 397). Install it like any native mod (the launcher's Mods page or
-`horizon-launcher native-build`), or apply it with `horizon-mixins apply` to an exported Horizon source.
-
-The crate's tests run on their own:
+Build it as a native trait mod with arismoko's launcher (see the "native mods" how-to in the arismoko/horizon docs):
 
 ```sh
-cd mixins/invsee/core && cargo test
+horizon-launcher native-build <path to this folder> --server-output <dir> --version <tag> --trust-native-code
 ```
 
-**Untested:** the bundle has not yet been applied to Horizon or run on a server; see STATUS.md, "Test first".
+`--trust-native-code` is your consent to compile and run this code inside the server. The logic crate tests run without the engine: `(cd core && cargo test)`.
+
+## Known gaps
+
+What does not work yet on arismoko/horizon (each is marked `TODO(arismoko-api: ...)` in `src/lib.rs`):
+
+- Offline players' inventories cannot be read (a mod cannot read the player file yet).
+- The view is a snapshot taken when it opens; there is no live menu over the target's slots yet.
+- Log lines go to stderr, not to the server's log file.
 
 ## Licence
 
 LGPL-2.1, see [LICENSE](LICENSE) (the original's licence text) and [NOTICE](NOTICE). The port derives from InvSee++,
 so the whole bundle is under the same licence.
-
-## Contributing
-
-Pull requests and improvements are always welcome! Open an issue or a PR -- direct pushes to main are disabled, every change goes through review.
