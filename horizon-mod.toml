@@ -2,7 +2,7 @@ id = "invsee"
 name = "invsee"
 version = "0.1.0"
 description = "/invsee and /endersee for Horizon: view a player's inventory, online or offline (port of InvSee++, LGPL-2.1)."
-authors = ["CoreSMP"]
+authors = ["Plugin-Horizon contributors"]
 api = "0.2"
 capabilities = ["registries"]
 
