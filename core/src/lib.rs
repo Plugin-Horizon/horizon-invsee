@@ -377,7 +377,7 @@ fn command_kind(word: &str) -> Option<Option<Kind>> {
     Some(match word {
         "invsee" | "inventorysee" | "isee" => Some(Kind::Inventory),
         "endersee" | "enderchestsee" | "esee" => Some(Kind::Ender),
-        "invseeplusplusreload" | "isppreload" => None,
+        "invseeplusplusreload" | "isppreload" | "invsee++reload" | "is++reload" => None,
         _ => return None,
     })
 }
@@ -481,6 +481,8 @@ impl<S: Clone + PartialEq> InvSee<S> {
         for w in ["endersee", "enderchestsee", "esee"] {
             out.push((format!("{w} [target:word?]"), a.endersee_view));
         }
+        // The `++` aliases of plugin.yml (`invsee++reload`, `is++reload`) are no command words for the engine; the
+        // mod's `player_command` hook answers them (`command_kind` still knows them).
         for w in ["invseeplusplusreload", "isppreload"] {
             out.push((w.to_string(), a.reload));
         }
