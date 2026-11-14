@@ -9,7 +9,7 @@ use horizon_invsee::{self as inv, Kind};
 use mod_api::{
     Command, CommandArgumentValue, CommandInvocation, CommandSource, Config, ConfigKind,
     ConfigLoadingEvent, ConfigReloadingEvent, Flow, HostSide, Hooks, Identifier, ItemStack,
-    MenuClickedEvent, MenuClosedEvent, PlayerLoggedInEvent,
+    MenuClickedEvent, MenuClosedEvent, PlayerCommandEvent, PlayerLoggedInEvent,
     PlayerLoggedOutEvent, RegisterCommandsEvent, RegisterConfigsEvent, RunModCommandEvent,
     ServerHost, ServerStoppingEvent, ServerTickEvent, ServerTickPhase, Suggestion,
     TabCompleteEvent, Text,
@@ -31,6 +31,10 @@ const OWN_WORDS: [&str; 8] = [
     "invseeplusplusreload",
     "isppreload",
 ];
+
+/// InvSee++'s `++` reload aliases: the engine refuses them as command words, so they are never registered;
+/// `player_command` answers them (the client sends the typed line even for an unknown command).
+const PLUS_WORDS: [&str; 2] = ["invsee++reload", "is++reload"];
 
 /// The mod's state, one per process (a dedicated server runs one world). Hooks take it with
 /// `try_lock`: a call that re-enters a hook while it is in use is deferred to the next tick.
@@ -305,6 +309,16 @@ fn usages() -> Vec<(String, u8)> {
     with(|m| m.usages()).unwrap_or_default()
 }
 
+/// The plugin.yml permission node of a command word (`invseeplusplus.invsee.view` for `invsee` and its
+/// aliases, `invseeplusplus.endersee.view`, `invseeplusplus.reload` for the reload words).
+fn node_of_word(word: &str) -> &'static str {
+    match word {
+        "endersee" | "enderchestsee" | "esee" => "invseeplusplus.endersee.view",
+        "invseeplusplusreload" | "isppreload" | "invsee++reload" | "is++reload" => "invseeplusplus.reload",
+        _ => "invseeplusplus.invsee.view",
+    }
+}
+
 /// The config text (`config/invsee-server.toml`) was read.
 fn config(text: &str, path: &Path) {
     let lines = with(|m| m.load_config(text, Some(path.to_path_buf()))).unwrap_or_default();
@@ -375,10 +389,73 @@ impl Hooks for Mod {
     fn register_commands(&self, _: &mut dyn ServerHost, event: &mut RegisterCommandsEvent<'_>) {
         for (usage, level) in usages() {
             // The core writes `word?` so the client asks for names; arismoko's word is plain `word`.
+            let usage = usage.replace("word?", "word");
+            // The plugin.yml node of the word: a permissions mod's answer decides who sees the usage, the level
+            // only when none answers (as Bukkit's `permission:`). Others get Bukkit's text from `player_command`.
+            let word = usage.split_whitespace().next().unwrap_or_default();
             event
                 .commands
-                .push(Command::op(&usage.replace("word?", "word"), level));
+                .push(Command::op(&usage, level).with_node(node_of_word(word)));
         }
+    }
+
+    /// Bukkit's text for a player without the command's permission (plugin.yml `permission:`, red).
+    /// The usage is hidden from such a player (`register_commands`), so the typed command would read
+    /// "unknown command" without this.
+    fn player_command(&self, host: &mut dyn ServerHost, event: &mut PlayerCommandEvent<'_>) -> Flow {
+        let root = event
+            .command
+            .trim_start_matches('/')
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .to_lowercase();
+        if PLUS_WORDS.contains(&root.as_str()) {
+            // Same node and level as `isppreload`; permitted players get the reload, others Bukkit's text.
+            let level = usages()
+                .iter()
+                .find(|(usage, _)| usage == "isppreload")
+                .map_or(1, |(_, level)| *level);
+            let uuid = event.player;
+            let name = host.player(uuid).and_then(|p| p.name(&*host)).unwrap_or_default();
+            let allowed = host.player(uuid).is_some_and(|p| match p.permission_value(&*host, "invseeplusplus.reload") {
+                Some(answer) => answer,
+                None => p.permission_level(&*host).unwrap_or(0) >= level,
+            });
+            event.cancelled = true;
+            if allowed {
+                for l in perform(host, uuid, &name, "invseeplusplusreload").unwrap_or_default() {
+                    let line = text(&*host, &l);
+                    event.replies.push(line);
+                }
+            } else {
+                event.replies.push(Text::literal(
+                    "\u{a7}cI'm sorry, but you do not have permission to perform this command. Please contact the server administrators if you believe that this is in error.",
+                ));
+            }
+            return Flow::Cancel;
+        }
+        if !OWN_WORDS.contains(&root.as_str()) {
+            return Flow::Continue;
+        }
+        let level = usages()
+            .iter()
+            .find(|(usage, _)| usage.split_whitespace().next() == Some(root.as_str()))
+            .map_or(0, |(_, level)| *level);
+        let node = node_of_word(&root);
+        let uuid = event.player;
+        let allowed = host.player(uuid).is_some_and(|p| match p.permission_value(&*host, node) {
+            Some(answer) => answer,
+            None => p.permission_level(&*host).unwrap_or(0) >= level,
+        });
+        if allowed {
+            return Flow::Continue;
+        }
+        event.cancelled = true;
+        event.replies.push(Text::literal(
+            "\u{a7}cI'm sorry, but you do not have permission to perform this command. Please contact the server administrators if you believe that this is in error.",
+        ));
+        Flow::Cancel
     }
 
     fn run_mod_command(&self, host: &mut dyn ServerHost, event: &mut RunModCommandEvent<'_>) -> Flow {
