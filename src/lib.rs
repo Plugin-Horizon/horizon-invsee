@@ -5,11 +5,14 @@
 //!
 //! Config: `config/invsee-server.toml` (`ConfigKind::Server`, written from the default when missing,
 //! read again when it changes).
-use horizon_invsee::{self as inv, Kind};
+
+pub mod horizon_invsee;
+use crate::horizon_invsee::{self as inv, Kind};
 use mod_api::{
     Command, CommandArgumentValue, CommandInvocation, CommandSource, Config, ConfigKind,
     ConfigLoadingEvent, ConfigReloadingEvent, Flow, HostSide, Hooks, Identifier, ItemStack,
-    MenuClickedEvent, MenuClosedEvent, PlayerCommandEvent, PlayerLoggedInEvent,
+    MenuClickedEvent, MenuClosedEvent, MenuReplace, NodeDefault, PermissionGatherNodesEvent,
+    PermissionLevel, PermissionNode, PermissionValueType, PlayerCommandEvent, PlayerLoggedInEvent,
     PlayerLoggedOutEvent, RegisterCommandsEvent, RegisterConfigsEvent, RunModCommandEvent,
     ServerHost, ServerStoppingEvent, ServerTickEvent, ServerTickPhase, Suggestion,
     TabCompleteEvent, Text,
@@ -169,8 +172,7 @@ impl inv::Host for GameHost<'_> {
             Kind::Ender => player.set_ender_chest_slot(&mut *self.host, slot as u32, new),
         };
         match written {
-            Ok(true) => Ok(current),
-            Ok(false) => Err("the game refused the slot".into()),
+            Ok(()) => Ok(current),
             Err(e) => Err(format!("{e:?}")),
         }
     }
@@ -205,7 +207,7 @@ impl inv::Host for GameHost<'_> {
         items: Vec<Option<ItemStack>>,
     ) -> Option<i32> {
         let title = text(&*self.host, title);
-        let window = self.host.open_menu(viewer, rows, title, items).ok().flatten();
+        let window = self.host.open_menu(viewer, rows, title, items, MenuReplace::CloseFirst).ok().flatten();
         if let Some(window) = window {
             WINDOWS.lock().unwrap_or_else(|e| e.into_inner()).insert(viewer, window);
         }
@@ -225,23 +227,21 @@ impl inv::Host for GameHost<'_> {
     // The core asks the server's own profile cache first (`profile_by_name`, `profile_by_uuid`) and
     // reads usercache.json or Mojang only when that gives nothing.
     fn profile_by_name(&self, name: &str) -> Option<(u128, String)> {
-        self.host.profile_by_name(name).map(|p| (p.uuid, p.name))
+        let player = self.host.players().player_by_name(name)?;
+        Some((player.uuid(), player.name(&*self.host)?))
     }
 
     fn profile_by_uuid(&self, uuid: u128) -> Option<String> {
-        self.host.profile_by_uuid(uuid).map(|p| p.name)
+        self.host.player(uuid)?.name(&*self.host)
     }
 
-    /// A permissions mod's answer for `node` (`player_permission_value`); without one, the
-    /// operator level against `default_level`, as the core's default does.
-    fn has_permission(&self, uuid: u128, node: &str, default_level: u8) -> bool {
+    /// The permission node's answer from the server's handler. The node's default is its shipped level
+    /// (`permission_gather_nodes`), so the config's `default_level` is not read here; a refused query is a denial.
+    fn has_permission(&mut self, uuid: u128, node: &str, _default_level: u8) -> bool {
         let Some(player) = self.host.player(uuid) else {
             return false;
         };
-        match player.permission_value(&*self.host, node) {
-            Some(answer) => answer,
-            None => player.permission_level(&*self.host).unwrap_or(0) >= default_level,
-        }
+        player.permission_bool(&mut *self.host, &bool_node(node)).unwrap_or(false)
     }
 
     fn refresh_commands(&mut self) {
@@ -282,12 +282,10 @@ impl inv::Host for GameHost<'_> {
                     .and_then(|id| self.host.item_key(&id))
             })
             .expect("minecraft:barrier is a vanilla item");
-        let mut stack = ItemStack::of(key);
-        // The name as the item's custom name; a refused name leaves the plain item.
-        if let Ok(name) = self.host.text_from_legacy(name) {
-            let _ = stack.set_display(&*self.host, Some(&name), &[]);
-        }
-        stack
+        // HMOD-GAP(item_custom_name): Horizon main has no custom-name API on an item stack (no typed component
+        // for `minecraft:custom_name`), so the placeholder is the plain item and its name is not shown.
+        let _ = name;
+        ItemStack::of(key)
     }
 
     fn describe(&self, stack: &ItemStack) -> (String, u32) {
@@ -319,6 +317,23 @@ fn node_of_word(word: &str) -> &'static str {
     }
 }
 
+/// The typed Boolean node of a plugin.yml permission name (`invseeplusplus.reload`).
+fn bool_node(name: &str) -> PermissionNode {
+    PermissionNode::new(name, PermissionValueType::Boolean)
+}
+
+/// The permission nodes the core asks, with the shipped default operator level of each (the `Access` defaults).
+/// `bypass-exempt` is not declared: its default is level 5 (nobody), which a Boolean node cannot express, and an
+/// undeclared node answers as a denial, so nobody has it (HMOD-GAP(bypass_exempt): a handler cannot grant it).
+const PERMISSION_NODES: [(&str, i32); 6] = [
+    ("invseeplusplus.invsee.view", 1),
+    ("invseeplusplus.invsee.edit", 1),
+    ("invseeplusplus.endersee.view", 1),
+    ("invseeplusplus.endersee.edit", 1),
+    ("invseeplusplus.reload", 1),
+    ("invseeplusplus.tabcomplete", 1),
+];
+
 /// The config text (`config/invsee-server.toml`) was read.
 fn config(text: &str, path: &Path) {
     let lines = with(|m| m.load_config(text, Some(path.to_path_buf()))).unwrap_or_default();
@@ -329,8 +344,8 @@ fn config(text: &str, path: &Path) {
 
 /// A player's command line (no slash); the core's lines for the player, or None when it is not ours.
 fn perform(host: &mut dyn ServerHost, uuid: u128, name: &str, line: &str) -> Option<Vec<String>> {
-    let game = GameHost { host };
-    with(|m| m.perform(&game, uuid, name, line)).flatten()
+    let mut game = GameHost { host };
+    with(|m| m.perform(&mut game, uuid, name, line)).flatten()
 }
 
 /// The console's command line; the core's lines, or None when it is not ours.
@@ -395,7 +410,13 @@ impl Hooks for Mod {
             let word = usage.split_whitespace().next().unwrap_or_default();
             event
                 .commands
-                .push(Command::op(&usage, level).with_node(node_of_word(word)));
+                .push(Command::op(&usage, level).with_node(&bool_node(node_of_word(word))));
+        }
+    }
+
+    fn permission_gather_nodes(&self, event: &mut PermissionGatherNodesEvent<'_>) {
+        for (node, level) in PERMISSION_NODES {
+            let _ = event.nodes.add(bool_node(node), NodeDefault::Level(PermissionLevel::from_level(level)));
         }
     }
 
@@ -411,17 +432,12 @@ impl Hooks for Mod {
             .unwrap_or_default()
             .to_lowercase();
         if PLUS_WORDS.contains(&root.as_str()) {
-            // Same node and level as `isppreload`; permitted players get the reload, others Bukkit's text.
-            let level = usages()
-                .iter()
-                .find(|(usage, _)| usage == "isppreload")
-                .map_or(1, |(_, level)| *level);
+            // Same node as `isppreload`; permitted players get the reload, others Bukkit's text.
             let uuid = event.player;
             let name = host.player(uuid).and_then(|p| p.name(&*host)).unwrap_or_default();
-            let allowed = host.player(uuid).is_some_and(|p| match p.permission_value(&*host, "invseeplusplus.reload") {
-                Some(answer) => answer,
-                None => p.permission_level(&*host).unwrap_or(0) >= level,
-            });
+            let allowed = host
+                .player(uuid)
+                .is_some_and(|p| p.permission_bool(&mut *host, &bool_node("invseeplusplus.reload")).unwrap_or(false));
             event.cancelled = true;
             if allowed {
                 for l in perform(host, uuid, &name, "invseeplusplusreload").unwrap_or_default() {
@@ -438,16 +454,11 @@ impl Hooks for Mod {
         if !OWN_WORDS.contains(&root.as_str()) {
             return Flow::Continue;
         }
-        let level = usages()
-            .iter()
-            .find(|(usage, _)| usage.split_whitespace().next() == Some(root.as_str()))
-            .map_or(0, |(_, level)| *level);
-        let node = node_of_word(&root);
+        let node = bool_node(node_of_word(&root));
         let uuid = event.player;
-        let allowed = host.player(uuid).is_some_and(|p| match p.permission_value(&*host, node) {
-            Some(answer) => answer,
-            None => p.permission_level(&*host).unwrap_or(0) >= level,
-        });
+        let allowed = host
+            .player(uuid)
+            .is_some_and(|p| p.permission_bool(&mut *host, &node).unwrap_or(false));
         if allowed {
             return Flow::Continue;
         }
@@ -488,9 +499,9 @@ impl Hooks for Mod {
     }
 
     fn tab_complete(&self, host: &mut dyn ServerHost, event: &mut TabCompleteEvent<'_>) {
-        let game = GameHost { host };
+        let mut game = GameHost { host };
         let Some(Some((start, names))) =
-            with(|m| m.tab_complete(&game, event.player, event.command))
+            with(|m| m.tab_complete(&mut game, event.player, event.command))
         else {
             return;
         };

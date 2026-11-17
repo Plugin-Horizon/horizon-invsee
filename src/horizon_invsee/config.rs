@@ -3,7 +3,7 @@
 use serde::Deserialize;
 
 /// The default file, as written next to the server when missing.
-pub const DEFAULT: &str = include_str!("../invsee-server.toml");
+pub const DEFAULT: &str = include_str!("../../data/invsee/invsee-server.toml");
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
@@ -173,8 +173,8 @@ impl Default for Titles {
 impl Default for Templates {
     fn default() -> Self {
         Templates {
-            inventory: crate::template::DEFAULT_INVENTORY.into(),
-            enderchest: crate::template::DEFAULT_ENDERCHEST.into(),
+            inventory: crate::horizon_invsee::template::DEFAULT_INVENTORY.into(),
+            enderchest: crate::horizon_invsee::template::DEFAULT_ENDERCHEST.into(),
         }
     }
 }

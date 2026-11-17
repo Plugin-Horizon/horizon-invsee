@@ -1,0 +1,28 @@
+# hmod port: invsee
+Round 1
+- Fixed:
+  - `src/lib.rs` `set_slot`: `set_inventory_slot` / `set_ender_chest_slot` return `Result<(), _>`; match arms updated (`Ok(())`, `Err`).
+  - `src/lib.rs` `open_menu`: passes `MenuReplace::CloseFirst` (the fifth argument).
+  - `src/lib.rs` `profile_by_name` / `profile_by_uuid`: `host.players().player_by_name` and `host.player(uuid)`.
+  - `src/lib.rs` `has_permission`: typed Boolean query `permission_bool` via `bool_node`; `GameHost` method is now `&mut self`.
+  - `src/lib.rs` `placeholder`: `set_display` call removed (see gap); `name` is unused.
+  - `src/lib.rs` `register_commands` and `player_command`: `with_node(&bool_node(..))`, typed `permission_bool` checks for the view/reload nodes; level fallbacks removed.
+  - `src/horizon_invsee/mod.rs` (core, the one signature change): trait `Host::has_permission` takes `&mut self`; `perform`, `tab_complete`, `resolve` take `host: &mut H`.
+  - `src/horizon_invsee/tests.rs`: `Fake::has_permission` takes `&mut self`; call sites use `&mut f`; one `let (mut m, mut f)`.
+  - `src/lib.rs`: added `permission_gather_nodes` (`PERMISSION_NODES`).
+- Permission nodes (default level, declared in `permission_gather_nodes`):
+  - `invseeplusplus.invsee.view` -> 1
+  - `invseeplusplus.invsee.edit` -> 1
+  - `invseeplusplus.endersee.view` -> 1
+  - `invseeplusplus.endersee.edit` -> 1
+  - `invseeplusplus.reload` -> 1
+  - `invseeplusplus.tabcomplete` -> 1
+  - `invseeplusplus.invsee.bypass-exempt` / `endersee.bypass-exempt`: not declared (see gaps).
+- Gaps:
+  - HMOD-GAP(item_custom_name): no custom-name API on an item stack in Horizon main; the menu placeholder items are plain items without their name.
+  - HMOD-GAP(bypass_exempt): default is level 5 (nobody), which a Boolean node cannot express (`PermissionLevel::from_level` caps at 4). The nodes are not declared, so they answer as a denial, which gives the same default; a permission handler cannot grant them.
+- Unsure:
+  - Node defaults are the shipped `Access` defaults (level 1). The config's `access` levels are not read at gathering, so a changed level in `invsee-server.toml` no longer moves the node check; the core's `default_level` argument is ignored by the mod's `has_permission`.
+  - `invseeplusplus.tabcomplete` is one node for both kinds, its default is the shipped invsee view level (1).
+  - `MenuReplace::CloseFirst` chosen for `open_menu` (the vanilla default; the old API had no choice).
+  - The core signature change (`has_permission(&mut self)`, `host: &mut H`) is a deliberate edit inside the core module, needed because the typed query needs a mutable host.

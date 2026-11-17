@@ -71,9 +71,9 @@ fn fetch(url: &str, timeout: Duration) -> Found {
 /// `{"id": "<32 hex>", "name": "..."}`, as both endpoints answer.
 pub fn parse_profile(body: &str) -> Found {
     let v: serde_json::Value = serde_json::from_str(body).ok()?;
-    let id = crate::names::parse_uuid(v.get("id")?.as_str()?)?;
+    let id = crate::horizon_invsee::names::parse_uuid(v.get("id")?.as_str()?)?;
     let name = v.get("name")?.as_str()?;
-    crate::names::valid_name(name).then(|| (id, name.to_owned()))
+    crate::horizon_invsee::names::valid_name(name).then(|| (id, name.to_owned()))
 }
 
 #[cfg(test)]

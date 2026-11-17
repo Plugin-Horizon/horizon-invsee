@@ -1,6 +1,6 @@
 //! The layout of a view: which of the target's slots each of the menu's slots shows, from the
 //! `[templates]` text (one line per row of nine, words separated by spaces).
-use crate::Kind;
+use crate::horizon_invsee::Kind;
 
 pub const DEFAULT_INVENTORY: &str = "\
 i_00 i_01 i_02 i_03 i_04 i_05 i_06 i_07 i_08

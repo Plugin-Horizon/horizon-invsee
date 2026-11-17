@@ -186,7 +186,7 @@ pub trait Host {
     }
     /// Whether `uuid` has the permission `node`: a permissions mod's answer, else whether their
     /// operator level is `default_level` or more (`native_has_permission`).
-    fn has_permission(&self, uuid: u128, _node: &str, default_level: u8) -> bool {
+    fn has_permission(&mut self, uuid: u128, _node: &str, default_level: u8) -> bool {
         self.players()
             .iter()
             .find(|o| o.uuid == uuid)
@@ -524,7 +524,7 @@ impl<S: Clone + PartialEq> InvSee<S> {
     /// A player's command (no slash). None when it isn't one of ours; else the lines to answer.
     /// The view opens on the next tick: inventories can't be read inside a player's turn.
     /// As in InvSee++, only the first argument counts; anything after it is ignored.
-    pub fn perform<H: Host<Stack = S>>(&mut self, host: &H, viewer: u128, name: &str, line: &str) -> Option<Vec<String>> {
+    pub fn perform<H: Host<Stack = S>>(&mut self, host: &mut H, viewer: u128, name: &str, line: &str) -> Option<Vec<String>> {
         let mut words = line.split_whitespace();
         let word = words.next()?.to_lowercase();
         let Some(kind) = command_kind(&word)? else {
@@ -588,7 +588,7 @@ impl<S: Clone + PartialEq> InvSee<S> {
 
     /// Completions for the argument of `command` (as the client sent it, slash or not): the
     /// byte where the argument starts, and the names. None when it isn't ours.
-    pub fn tab_complete<H: Host<Stack = S>>(&mut self, host: &H, player: u128, command: &str) -> Option<(usize, Vec<String>)> {
+    pub fn tab_complete<H: Host<Stack = S>>(&mut self, host: &mut H, player: u128, command: &str) -> Option<(usize, Vec<String>)> {
         let cmd = command.trim_start_matches('/');
         let offset = command.len() - cmd.len();
         let (word, arg) = cmd.split_once(' ')?;
@@ -658,7 +658,7 @@ impl<S: Clone + PartialEq> InvSee<S> {
         }
     }
 
-    fn resolve<H: Host<Stack = S>>(&mut self, host: &H, p: &mut Pending) -> Resolve {
+    fn resolve<H: Host<Stack = S>>(&mut self, host: &mut H, p: &mut Pending) -> Resolve {
         let list = match p.query {
             Query::Name(_) => self.cfg.players.uuid_resolve.clone(),
             Query::Uuid(_) => self.cfg.players.name_resolve.clone(),
