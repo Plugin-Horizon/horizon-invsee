@@ -42,7 +42,11 @@ fn node(kind: Kind, action: &str) -> String {
         Kind::Inventory => "invsee",
         Kind::Ender => "endersee",
     };
-    format!("invseeplusplus.{word}.{action}")
+    match action {
+        // InvSee++'s exemption nodes put the action first (`Exempt.java`).
+        "exempt" | "bypass-exempt" => format!("invseeplusplus.{action}.{word}"),
+        _ => format!("invseeplusplus.{word}.{action}"),
+    }
 }
 
 /// The target-inventory slot an item is worn in, by its id: armour, and the off hand for a
@@ -539,11 +543,11 @@ impl<S: Clone + PartialEq> InvSee<S> {
         let Some(target) = words.next() else {
             return Some(vec![usage(kind)]);
         };
+        // Any other word is a name, as in InvSee++ (a Bedrock name starts with a dot); only Mojang is not asked
+        // about a name that can't be one.
         let query = match parse_uuid(target) {
             Some(u) => Query::Uuid(u),
-            // A name that can't be one is simply not found (InvSee++ asks no one about it).
-            None if valid_name(target) => Query::Name(target.to_owned()),
-            None => return Some(vec![format!("§cPlayer {target} does not exist.")]),
+            None => Query::Name(target.to_owned()),
         };
         // One request at a time per spectator: the newest wins.
         self.pending.retain(|p| p.viewer != viewer);
@@ -691,6 +695,7 @@ impl<S: Clone + PartialEq> InvSee<S> {
                         .or_else(|| self.usercache().and_then(|d| d.name(u)))
                         .map(|n| (u, n))
                 }
+                (Query::Name(n), Resolver::Mojang) if !valid_name(n) => None,
                 (q, Resolver::Mojang) => {
                     let timeout = Duration::from_millis(self.cfg.players.mojang_timeout_ms);
                     let lookup = p.lookup.get_or_insert_with(|| (self.lookup)(q, timeout));
@@ -753,7 +758,9 @@ impl<S: Clone + PartialEq> InvSee<S> {
             return;
         }
         let bypass = host.has_permission(p.viewer, &node(p.kind, "bypass-exempt"), self.cfg.access.bypass_exempt);
-        if self.exempt(p.kind, target, &name) && !bypass {
+        // Exempt by the config list, or by holding `invseeplusplus.exempt.<kind>` (online targets only).
+        let exempt = self.exempt(p.kind, target, &name) || host.has_permission(target, &node(p.kind, "exempt"), 5);
+        if exempt && !bypass {
             host.tell(p.viewer, &format!("§cPlayer {} is exempted from being spectated.", p.typed));
             return;
         }

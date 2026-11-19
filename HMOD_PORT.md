@@ -26,3 +26,17 @@ Round 1
   - `invseeplusplus.tabcomplete` is one node for both kinds, its default is the shipped invsee view level (1).
   - `MenuReplace::CloseFirst` chosen for `open_menu` (the vanilla default; the old API had no choice).
   - The core signature change (`has_permission(&mut self)`, `host: &mut H`) is a deliberate edit inside the core module, needed because the typed query needs a mutable host.
+
+Round 2 (parity fixes)
+- Fixed: bypass-exempt node names are `invseeplusplus.bypass-exempt.invsee|endersee` (were reversed); added
+  `invseeplusplus.exempt.invsee|endersee` (target holds it -> exempt, online targets); all four declared at level 4.
+- Fixed: node defaults for view/edit/reload/tabcomplete now follow the `[access]` levels read from the config at gather time.
+- Fixed: any typed word is looked up as a name (Bedrock names with a dot); `valid_name` only guards the Mojang request;
+  usercache entries accept dotted names.
+- Fixed: a command that arrives while the state is in use is deferred to the next tick instead of being dropped.
+- Fixed: a failed rollback in `move_stack` is reported to the spectator.
+- Closed: HMOD-GAP(item_custom_name): placeholders get `minecraft:custom_name` through `ItemStack::apply_components`.
+- Gaps still open: offline inventories (no API; tab completion still offers offline names), live shared menu, log to stderr,
+  `bypass_exempt` default (level 4, not nobody), proxy/permission uuid strategies, personal-slot placeholders per container.
+- Dropped finding: undashed 32-hex UUIDs are still accepted (harmless superset; the config exempt lists rely on it).
+- Unsure: `Tag::Byte(0)` for `italic` and a compound text component for `custom_name` are written blind.

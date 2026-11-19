@@ -39,6 +39,12 @@ pub fn valid_name(s: &str) -> bool {
     (1..=16).contains(&s.len()) && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// A name as the server's own files can hold it: Floodgate's Bedrock names start with a dot and may differ
+/// from Java's rule, so only length and whitespace are checked.
+pub fn plausible_name(s: &str) -> bool {
+    !s.is_empty() && s.chars().count() <= 16 && !s.chars().any(|c| c.is_whitespace() || c.is_control())
+}
+
 /// The UUID an offline-mode server gives `name`: version 3 (MD5) of `OfflinePlayer:<name>`,
 /// as `UUIDUtil.createOfflinePlayerUUID` makes it.
 pub fn offline_uuid(name: &str) -> u128 {
@@ -147,7 +153,7 @@ pub fn parse_usercache(text: &str) -> Directory {
         ) else {
             continue;
         };
-        if valid_name(name) {
+        if plausible_name(name) {
             d.add(uuid, name);
         }
     }
@@ -231,6 +237,16 @@ mod tests {
         assert_eq!(d.uuid("alice_1"), Some((1, "Alice_1".into())));
         assert_eq!(d.name(2).as_deref(), Some("Bob"));
         assert!(parse_usercache("not json").is_empty());
+    }
+
+    #[test]
+    fn bedrock_names_with_a_dot_are_kept() {
+        let text = r#"[{"name":".Steve_B","uuid":"00000000-0000-0000-0000-000000000005","expiresOn":"x"}]"#;
+        let d = parse_usercache(text);
+        assert_eq!(d.uuid(".steve_b"), Some((5, ".Steve_B".into())));
+        assert!(!valid_name(".Steve_B"), "Mojang is still not asked about it");
+        assert!(plausible_name(".Steve_B"));
+        assert!(!plausible_name("two words"));
     }
 
     #[test]

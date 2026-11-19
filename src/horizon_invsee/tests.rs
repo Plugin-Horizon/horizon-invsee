@@ -511,6 +511,28 @@ fn a_full_inventory_moves_nothing_and_says_so() {
 }
 
 #[test]
+fn exemption_nodes_have_the_original_names() {
+    assert_eq!(node(Kind::Inventory, "bypass-exempt"), "invseeplusplus.bypass-exempt.invsee");
+    assert_eq!(node(Kind::Ender, "bypass-exempt"), "invseeplusplus.bypass-exempt.endersee");
+    assert_eq!(node(Kind::Ender, "exempt"), "invseeplusplus.exempt.endersee");
+    assert_eq!(node(Kind::Inventory, "view"), "invseeplusplus.invsee.view");
+}
+
+#[test]
+fn a_permission_exempts_the_target_and_another_lets_the_viewer_through() {
+    let (mut m, mut f) = setup();
+    f.perms.insert((BOB, "invseeplusplus.exempt.invsee".into()), true);
+    m.perform(&mut f, HELPER, "Helper", "invsee Bob");
+    m.tick(&mut f);
+    assert!(!f.menus.contains_key(&HELPER));
+    assert!(f.told(HELPER)[0].contains("is exempted from being spectated."));
+    f.perms.insert((HELPER, "invseeplusplus.bypass-exempt.invsee".into()), true);
+    m.perform(&mut f, HELPER, "Helper", "invsee Bob");
+    m.tick(&mut f);
+    assert!(f.menus.contains_key(&HELPER));
+}
+
+#[test]
 fn commands_usages_console_and_completion() {
     let (mut m, mut f) = setup();
     assert_eq!(m.perform(&mut f, ADMIN, "Admin", "gamemode creative"), None);
@@ -518,8 +540,9 @@ fn commands_usages_console_and_completion() {
     assert_eq!(r, vec!["/invsee <username>|<uuid>".to_string()]);
     // Only the first argument counts; the rest is ignored, as InvSee++ does.
     assert_eq!(m.perform(&mut f, ADMIN, "Admin", "invsee a b"), Some(vec![]));
-    let r = m.perform(&mut f, ADMIN, "Admin", "invsee no-such!name").unwrap();
-    assert!(r[0].contains("does not exist"), "{r:?}");
+    assert_eq!(m.perform(&mut f, ADMIN, "Admin", "invsee no-such!name"), Some(vec![]));
+    m.tick(&mut f);
+    assert!(f.told(ADMIN).iter().any(|l| l.contains("Player no-such!name does not exist.")), "{:?}", f.told);
     assert_eq!(m.console("invsee"), Some(vec!["/invsee <username>|<uuid>".into()]));
     assert_eq!(
         m.console("invsee Bob"),

@@ -9,13 +9,13 @@
 pub mod horizon_invsee;
 use crate::horizon_invsee::{self as inv, Kind};
 use mod_api::{
-    Command, CommandArgumentValue, CommandInvocation, CommandSource, Config, ConfigKind,
+    Command, CommandArgumentValue, CommandInvocation, CommandSource, Compound, Config, ConfigKind,
     ConfigLoadingEvent, ConfigReloadingEvent, Flow, HostSide, Hooks, Identifier, ItemStack,
     MenuClickedEvent, MenuClosedEvent, MenuReplace, NodeDefault, PermissionGatherNodesEvent,
     PermissionLevel, PermissionNode, PermissionValueType, PlayerCommandEvent, PlayerLoggedInEvent,
     PlayerLoggedOutEvent, RegisterCommandsEvent, RegisterConfigsEvent, RunModCommandEvent,
     ServerHost, ServerStoppingEvent, ServerTickEvent, ServerTickPhase, Suggestion,
-    TabCompleteEvent, Text,
+    TabCompleteEvent, Tag, Text,
 };
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -52,6 +52,8 @@ static WINDOWS: Mutex<BTreeMap<u128, i32>> = Mutex::new(BTreeMap::new());
 enum Deferred {
     Clicked(u128, i32, i32, i32, i32),
     Closed(u128, i32),
+    /// A command that arrived while the state was in use: the player (None: the console) and the line.
+    Command(Option<(u128, String)>, String),
 }
 
 /// Runs `f` on the state; None when it is already in use on this thread.
@@ -193,7 +195,10 @@ impl inv::Host for GameHost<'_> {
         let free = (0..room).find(|&i| target.slots[i].is_none()).ok_or("no free slot")?;
         self.set_slot(from.0, from.1, from.2, Some(expected), None)?;
         if let Err(e) = self.set_slot(to.0, to.1, free, None, Some(expected.clone())) {
-            let _ = self.set_slot(from.0, from.1, from.2, None, Some(expected.clone()));
+            // The source slot is put back only if it is still empty; a failed rollback is said, not hidden.
+            if self.set_slot(from.0, from.1, from.2, None, Some(expected.clone())).is_err() {
+                return Err(format!("{e}; the item could not be put back, check the slot"));
+            }
             return Err(e);
         }
         Ok(())
@@ -282,10 +287,23 @@ impl inv::Host for GameHost<'_> {
                     .and_then(|id| self.host.item_key(&id))
             })
             .expect("minecraft:barrier is a vanilla item");
-        // HMOD-GAP(item_custom_name): Horizon main has no custom-name API on an item stack (no typed component
-        // for `minecraft:custom_name`), so the placeholder is the plain item and its name is not shown.
-        let _ = name;
-        ItemStack::of(key)
+        let mut stack = ItemStack::of(key);
+        // The name is a text component (`minecraft:custom_name`): InvSee++'s names are `§b<name>` (aqua), not italic.
+        let (color, plain) = match name.strip_prefix("\u{a7}b") {
+            Some(rest) => (Some("aqua"), rest),
+            None => (None, name),
+        };
+        let mut text: Compound = [
+            ("text".into(), Tag::String(plain.into())),
+            ("italic".into(), Tag::Byte(0)),
+        ]
+        .into();
+        if let Some(color) = color {
+            text.insert("color".into(), Tag::String(color.into()));
+        }
+        let patch: Compound = [("minecraft:custom_name".into(), Tag::Compound(text))].into();
+        let _ = stack.apply_components(&patch);
+        stack
     }
 
     fn describe(&self, stack: &ItemStack) -> (String, u32) {
@@ -322,17 +340,30 @@ fn bool_node(name: &str) -> PermissionNode {
     PermissionNode::new(name, PermissionValueType::Boolean)
 }
 
-/// The permission nodes the core asks, with the shipped default operator level of each (the `Access` defaults).
-/// `bypass-exempt` is not declared: its default is level 5 (nobody), which a Boolean node cannot express, and an
-/// undeclared node answers as a denial, so nobody has it (HMOD-GAP(bypass_exempt): a handler cannot grant it).
-const PERMISSION_NODES: [(&str, i32); 6] = [
-    ("invseeplusplus.invsee.view", 1),
-    ("invseeplusplus.invsee.edit", 1),
-    ("invseeplusplus.endersee.view", 1),
-    ("invseeplusplus.endersee.edit", 1),
-    ("invseeplusplus.reload", 1),
-    ("invseeplusplus.tabcomplete", 1),
-];
+/// The permission nodes the core asks, with the operator level that grants each by default. The view, edit,
+/// reload and tab-complete levels are the `[access]` levels of `config/invsee-server.toml` at start (the shipped
+/// defaults without the file; changing them needs a restart). `bypass-exempt` and `exempt` default to "nobody" in
+/// InvSee++, which a Boolean node cannot express: they are declared at level 4 so a permission mod can grant them
+/// (HMOD-GAP(bypass_exempt): level-4 operators hold them by default).
+fn permission_nodes() -> Vec<(&'static str, i32)> {
+    let access = std::fs::read_to_string(Path::new("config").join("invsee-server.toml"))
+        .ok()
+        .and_then(|t| inv::config::Config::parse(&t).ok())
+        .map(|c| c.access)
+        .unwrap_or_default();
+    vec![
+        ("invseeplusplus.invsee.view", access.invsee_view as i32),
+        ("invseeplusplus.invsee.edit", access.invsee_edit as i32),
+        ("invseeplusplus.endersee.view", access.endersee_view as i32),
+        ("invseeplusplus.endersee.edit", access.endersee_edit as i32),
+        ("invseeplusplus.reload", access.reload as i32),
+        ("invseeplusplus.tabcomplete", access.invsee_view.min(access.endersee_view) as i32),
+        ("invseeplusplus.bypass-exempt.invsee", 4),
+        ("invseeplusplus.bypass-exempt.endersee", 4),
+        ("invseeplusplus.exempt.invsee", 4),
+        ("invseeplusplus.exempt.endersee", 4),
+    ]
+}
 
 /// The config text (`config/invsee-server.toml`) was read.
 fn config(text: &str, path: &Path) {
@@ -344,13 +375,18 @@ fn config(text: &str, path: &Path) {
 
 /// A player's command line (no slash); the core's lines for the player, or None when it is not ours.
 fn perform(host: &mut dyn ServerHost, uuid: u128, name: &str, line: &str) -> Option<Vec<String>> {
-    let mut game = GameHost { host };
-    with(|m| m.perform(&mut game, uuid, name, line)).flatten()
+    perform_try(host, uuid, name, line).flatten()
 }
 
-/// The console's command line; the core's lines, or None when it is not ours.
-fn console(line: &str) -> Option<Vec<String>> {
-    with(|m| m.console(line)).flatten()
+/// As `perform`, but the outer None says the state was in use (the caller defers the command).
+fn perform_try(host: &mut dyn ServerHost, uuid: u128, name: &str, line: &str) -> Option<Option<Vec<String>>> {
+    let mut game = GameHost { host };
+    with(|m| m.perform(&mut game, uuid, name, line))
+}
+
+/// The console's command line; the core's lines, or None when it is not ours or the state is in use.
+fn console_try(line: &str) -> Option<Option<Vec<String>>> {
+    with(|m| m.console(line))
 }
 
 /// The command as the core reads a line: its literals, then its text and word arguments.
@@ -367,11 +403,29 @@ fn command_line(command: &CommandInvocation) -> String {
 /// Once a tick, at its end: opens pending views, follows open views, polls Mojang lookups.
 fn tick(game: &mut GameHost<'_>) {
     let deferred = std::mem::take(&mut *DEFERRED.lock().unwrap_or_else(|e| e.into_inner()));
+    // Commands first: they take the state themselves.
+    for d in &deferred {
+        if let Deferred::Command(sender, line) = d {
+            match sender {
+                Some((uuid, name)) => {
+                    for l in perform(&mut *game.host, *uuid, name, line).unwrap_or_default() {
+                        inv::Host::tell(&mut *game, *uuid, &l);
+                    }
+                }
+                None => {
+                    for l in console_try(line).flatten().unwrap_or_default() {
+                        eprint_line(&l);
+                    }
+                }
+            }
+        }
+    }
     with(|m| {
         for d in deferred {
             match d {
                 Deferred::Clicked(u, w, s, b, mode) => m.clicked(game, u, w, s, b, mode),
                 Deferred::Closed(u, w) => m.closed(game, u, w),
+                Deferred::Command(..) => {}
             }
         }
         m.tick(game);
@@ -415,7 +469,7 @@ impl Hooks for Mod {
     }
 
     fn permission_gather_nodes(&self, event: &mut PermissionGatherNodesEvent<'_>) {
-        for (node, level) in PERMISSION_NODES {
+        for (node, level) in permission_nodes() {
             let _ = event.nodes.add(bool_node(node), NodeDefault::Level(PermissionLevel::from_level(level)));
         }
     }
@@ -479,16 +533,29 @@ impl Hooks for Mod {
             return Flow::Continue;
         }
         let line = command_line(&event.command);
+        // Outer None: the state is in use; the command runs at the end of the tick and answers the player (or the log).
         let answer = match &event.source {
             CommandSource::Player { player, .. } => {
                 let uuid = player.uuid();
                 let name = player.name(&*host).unwrap_or_default();
-                perform(host, uuid, &name, &line)
+                let answer = perform_try(host, uuid, &name, &line);
+                if answer.is_none() {
+                    defer(Deferred::Command(Some((uuid, name)), line));
+                    return Flow::Cancel;
+                }
+                answer
             }
-            CommandSource::Console { .. } => console(&line),
+            CommandSource::Console { .. } => {
+                let answer = console_try(&line);
+                if answer.is_none() {
+                    defer(Deferred::Command(None, line));
+                    return Flow::Cancel;
+                }
+                answer
+            }
             _ => None,
         };
-        let Some(lines) = answer else {
+        let Some(lines) = answer.flatten() else {
             return Flow::Continue;
         };
         for l in lines {

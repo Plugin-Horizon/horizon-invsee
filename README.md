@@ -37,7 +37,7 @@ inventory; a right click takes the larger half into a free slot of yours; clicki
 the view moves it whole into the target's, and armour, elytra, shields and totems go to the slot they are worn in
 (a piece already worn swaps places with it). A number key over an
 empty slot of the view gives your hotbar slot. Middle click, Q, dragging and double clicks do nothing. Every move is
-one checked step in Horizon (`native_move_stack`): nothing is duplicated or lost, and a move that no longer fits or
+two checked writes (source emptied, then the target filled; the source is put back if the second fails and the slot is still free, otherwise the message says so), and a move that no longer fits or
 whose stack changed does nothing and says why.
 
 ## Configuration
@@ -54,10 +54,12 @@ it changes (see [`core/invsee-server.toml`](core/invsee-server.toml)):
   (`<world>/invsee/InvSee++ logs/_global.log`), `SPECTATOR_LOG_FILE` (`<world>/invsee/InvSee++ logs/<uuid>.log`), `SERVER_LOG_FILE`,
   `CONSOLE`, and the formats with `<date> <time> <level> <spectator_uuid> <spectator_name> <taken> <given> <target>`.
 
-Permission nodes (`invseeplusplus.invsee.view|edit|bypass-exempt`, the same for `endersee`, `invseeplusplus.reload`,
-`invseeplusplus.tabcomplete`) are asked through Horizon's permission check, so a permissions mod can answer them; where
-none does, the operator levels of `[access]` apply. Changing those levels in the file resends every player's command
-tree.
+Permission nodes (`invseeplusplus.invsee.view|edit`, `invseeplusplus.endersee.view|edit`, `invseeplusplus.reload`,
+`invseeplusplus.tabcomplete`, `invseeplusplus.bypass-exempt.invsee|endersee`, `invseeplusplus.exempt.invsee|endersee`)
+are asked through Horizon's permission check, so a permissions mod can answer them. The default of the first six is
+the operator level of `[access]` as read at server start (a restart applies a changed level); the exempt and
+bypass-exempt nodes are declared at level 4 (InvSee++'s default is nobody, which a node default cannot say). A target
+is exempt when it is in the config list or holds `invseeplusplus.exempt.<kind>` (online targets only).
 
 ## Differences from InvSee++
 
