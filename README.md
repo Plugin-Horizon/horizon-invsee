@@ -1,5 +1,9 @@
 # invsee for Horizon
 
+## Port status
+
+Compared with InvSee++ (master, 722def9) (estimate): **82 %** of the original's commands, permissions, config keys, messages and features work today; **89 %** once our open Horizon PRs are merged; **91 %** with the engine changes we are writing; **82 %** with the newest Horizon SDK. Estimated count: 37/45 items. Status: not yet compiled after the 2026-11-20 round.
+
 > **Unofficial Rust port of InvSee++ for the Horizon server (https://github.com/arismoko/horizon). Not affiliated with or endorsed by the InvSee++ authors.**
 
 A native mod for [Horizon](https://github.com/arismoko/horizon) servers: operators open another player's
