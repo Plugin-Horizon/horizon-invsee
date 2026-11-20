@@ -17,7 +17,7 @@ pub mod template;
 
 use config::{Config, Granularity, Palette, Resolver};
 use mojang::{Lookup, Poll};
-use names::{parse_uuid, valid_name, Directory, Usercache};
+use names::{parse_uuid, parse_uuid_lenient, valid_name, Directory, Usercache};
 use std::path::PathBuf;
 use std::time::Duration;
 use template::{Cell, Layout, Unavailable};
@@ -798,7 +798,6 @@ impl<S: Clone + PartialEq> InvSee<S> {
         names.retain(|n| n.to_lowercase().starts_with(&prefix));
         names.sort_by_key(|n| n.to_lowercase());
         names.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
-        names.truncate(100);
         Some((offset + word.len() + 1, names))
     }
 
@@ -924,7 +923,7 @@ impl<S: Clone + PartialEq> InvSee<S> {
             Kind::Ender => &self.cfg.access.exempt_endersee,
         };
         list.iter().any(|e| {
-            parse_uuid(e).map_or_else(|| e.eq_ignore_ascii_case(name), |u| u == uuid)
+            parse_uuid_lenient(e).map_or_else(|| e.eq_ignore_ascii_case(name), |u| u == uuid)
         })
     }
 
