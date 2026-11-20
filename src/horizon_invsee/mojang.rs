@@ -93,7 +93,7 @@ fn fetch(url: &str, timeout: Duration, parse: fn(&str) -> Found) -> Found {
 /// `{"id": "<32 hex>", "name": "..."}`, as both endpoints answer.
 pub fn parse_profile(body: &str) -> Found {
     let v: serde_json::Value = serde_json::from_str(body).ok()?;
-    let id = crate::horizon_invsee::names::parse_uuid(v.get("id")?.as_str()?)?;
+    let id = crate::horizon_invsee::names::parse_uuid_lenient(v.get("id")?.as_str()?)?;
     let name = v.get("name")?.as_str()?;
     crate::horizon_invsee::names::valid_name(name).then(|| (id, name.to_owned()))
 }
@@ -101,7 +101,7 @@ pub fn parse_profile(body: &str) -> Found {
 /// `{"uuid": "<dashed>", "username": "..."}`, as the Electroid mirror answers.
 pub fn parse_electroid(body: &str) -> Found {
     let v: serde_json::Value = serde_json::from_str(body).ok()?;
-    let id = crate::horizon_invsee::names::parse_uuid(v.get("uuid")?.as_str()?)?;
+    let id = crate::horizon_invsee::names::parse_uuid_lenient(v.get("uuid")?.as_str()?)?;
     let name = v.get("username")?.as_str()?;
     crate::horizon_invsee::names::valid_name(name).then(|| (id, name.to_owned()))
 }
