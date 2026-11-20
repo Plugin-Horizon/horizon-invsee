@@ -38,6 +38,11 @@ struct Fake {
     /// Profiles the server's cache holds.
     profiles: Vec<(u128, String)>,
     refreshed: u32,
+    /// The game lets the mod read and write the spectator's cursor.
+    cursor_mode: bool,
+    cursors: HashMap<u128, Option<St>>,
+    open: HashMap<u128, String>,
+    grids: HashMap<u128, Vec<Option<St>>>,
 }
 
 const ADMIN: u128 = 1;
@@ -230,6 +235,28 @@ impl Host for Fake {
             name: Some(name.into()),
         }
     }
+    fn same_stack(&self, a: &St, b: &St) -> bool {
+        a.item == b.item && a.name == b.name
+    }
+    fn cursor(&mut self, viewer: u128, _window: i32) -> Option<Option<St>> {
+        self.cursor_mode.then(|| self.cursors.get(&viewer).cloned().flatten())
+    }
+    fn set_cursor(&mut self, viewer: u128, _w: i32, expected: Option<&St>, new: Option<St>) -> Result<(), String> {
+        if self.cursors.get(&viewer).cloned().flatten().as_ref() != expected {
+            return Err("the cursor changed".into());
+        }
+        self.cursors.insert(viewer, new);
+        Ok(())
+    }
+    fn begin(&mut self) -> bool {
+        true
+    }
+    fn open_container(&self, uuid: u128) -> Option<String> {
+        self.open.get(&uuid).cloned()
+    }
+    fn target_extras(&mut self, uuid: u128) -> Extras<St> {
+        Extras { grid: self.grids.get(&uuid).cloned(), cursor: self.cursors.get(&uuid).cloned().flatten() }
+    }
     fn describe(&self, s: &St) -> (String, u32) {
         (s.item.clone(), s.count)
     }
@@ -281,7 +308,7 @@ fn invsee_opens_a_live_view_of_an_online_player() {
     assert_eq!(items[36].as_ref().unwrap().name.as_deref(), Some("§bBoots"));
     assert_eq!(items[36].as_ref().unwrap().item, "minecraft:light_blue_stained_glass_pane");
     assert_eq!(items[43].as_ref().unwrap().name.as_deref(), Some("§bCursor"));
-    assert_eq!(items[44], None);
+    assert_eq!(items[44].as_ref().unwrap().name.as_deref(), Some("§4"), "an unused cell is inaccessible");
     // Bob picks something up: the view follows on the next tick.
     f.set(BOB, Kind::Inventory, 5, Some(st("bread", 3)));
     m.tick(&mut f);
@@ -712,4 +739,122 @@ fn a_reload_that_changes_the_levels_resends_the_command_trees() {
     assert_eq!(f.refreshed, 1);
     m.tick(&mut f);
     assert_eq!(f.refreshed, 1, "once");
+}
+
+fn board(own: Vec<Option<St>>, locked: Vec<bool>, cursor: Option<St>) -> click::Board<St> {
+    click::Board { own, locked, inv: vec![None; 36], cursor }
+}
+
+#[test]
+fn a_left_click_picks_up_and_puts_down() {
+    let f = Fake::new();
+    let mut b = board(vec![Some(st("diamond", 5)), None], vec![false; 2], None);
+    let mut d = None;
+    assert!(click::click(&f, &mut b, &mut d, 0, 0, 0));
+    assert_eq!(b.cursor, Some(st("diamond", 5)));
+    assert_eq!(b.own[0], None);
+    assert!(click::click(&f, &mut b, &mut d, 1, 1, 0), "a right click puts one");
+    assert_eq!(b.own[1], Some(st("diamond", 1)));
+    assert_eq!(b.cursor, Some(st("diamond", 4)));
+}
+
+#[test]
+fn a_right_click_takes_the_larger_half_and_locked_slots_do_nothing() {
+    let f = Fake::new();
+    let mut b = board(vec![Some(st("diamond", 5)), Some(st("stone", 2))], vec![false, true], None);
+    let mut d = None;
+    assert!(click::click(&f, &mut b, &mut d, 0, 1, 0));
+    assert_eq!(b.cursor, Some(st("diamond", 3)));
+    assert_eq!(b.own[0], Some(st("diamond", 2)));
+    assert!(!click::click(&f, &mut b, &mut d, 1, 0, 0), "a locked slot gives nothing");
+}
+
+#[test]
+fn a_different_stack_swaps_with_the_cursor() {
+    let f = Fake::new();
+    let mut b = board(vec![Some(st("stone", 2))], vec![false], Some(st("dirt", 7)));
+    let mut d = None;
+    assert!(click::click(&f, &mut b, &mut d, 0, 0, 0));
+    assert_eq!(b.own[0], Some(st("dirt", 7)));
+    assert_eq!(b.cursor, Some(st("stone", 2)));
+}
+
+#[test]
+fn shift_click_goes_to_the_other_side() {
+    let f = Fake::new();
+    let mut b = board(vec![Some(st("diamond", 5)); 1], vec![false], None);
+    let mut d = None;
+    // Own slot to the spectator's inventory: the hotbar's last slot first.
+    assert!(click::click(&f, &mut b, &mut d, 0, 0, 1));
+    assert_eq!(b.own[0], None);
+    assert_eq!(b.inv[8], Some(st("diamond", 5)));
+    // And back: the inventory slot (below the one own slot) to the first free own slot.
+    assert!(click::click(&f, &mut b, &mut d, 1 + 27 + 8, 0, 1));
+    assert_eq!(b.own[0], Some(st("diamond", 5)));
+    assert_eq!(b.inv[8], None);
+}
+
+#[test]
+fn a_number_key_swaps_with_the_hotbar() {
+    let f = Fake::new();
+    let mut b = board(vec![Some(st("diamond", 5))], vec![false], None);
+    b.inv[2] = Some(st("stone", 1));
+    let mut d = None;
+    assert!(click::click(&f, &mut b, &mut d, 0, 2, 2));
+    assert_eq!(b.own[0], Some(st("stone", 1)));
+    assert_eq!(b.inv[2], Some(st("diamond", 5)));
+}
+
+#[test]
+fn a_drag_spreads_the_cursor_evenly() {
+    let f = Fake::new();
+    let mut b = board(vec![None, None, None], vec![false; 3], Some(st("stone", 10)));
+    let mut d = None;
+    assert!(!click::click(&f, &mut b, &mut d, -999, 0, 5));
+    for slot in 0..3 {
+        assert!(!click::click(&f, &mut b, &mut d, slot, 1, 5));
+    }
+    assert!(click::click(&f, &mut b, &mut d, -999, 2, 5));
+    assert_eq!(b.own, vec![Some(st("stone", 3)); 3]);
+    assert_eq!(b.cursor, Some(st("stone", 1)));
+}
+
+#[test]
+fn a_double_click_gathers_matching_stacks() {
+    let f = Fake::new();
+    let mut b = board(vec![Some(st("stone", 10)), Some(st("dirt", 4)), Some(st("stone", 60))], vec![false; 3], Some(st("stone", 1)));
+    let mut d = None;
+    assert!(click::click(&f, &mut b, &mut d, 0, 0, 6));
+    assert_eq!(b.cursor, Some(st("stone", 64)));
+    assert_eq!(b.own[0], None);
+    assert_eq!(b.own[2], Some(st("stone", 7)));
+}
+
+#[test]
+fn a_live_click_writes_the_target_the_spectator_and_the_cursor() {
+    let (mut m, mut f) = setup();
+    f.cursor_mode = true;
+    f.set(BOB, Kind::Inventory, 3, Some(st("diamond", 5)));
+    m.perform(&mut f, ADMIN, "Admin", "invsee Bob");
+    m.tick(&mut f);
+    let w = f.menu(ADMIN).0;
+    m.clicked(&mut f, ADMIN, w, 3, 0, 0);
+    assert_eq!(f.get(BOB, Kind::Inventory, 3), None);
+    assert_eq!(f.cursors[&ADMIN], Some(st("diamond", 5)));
+    assert_eq!(f.menu(ADMIN).3[3], None);
+    // Put them in the spectator's own slot below the view.
+    m.clicked(&mut f, ADMIN, w, below(10), 0, 0);
+    assert_eq!(f.get(ADMIN, Kind::Inventory, 10), Some(st("diamond", 5)));
+    assert_eq!(f.cursors[&ADMIN], None);
+}
+
+#[test]
+fn a_view_shows_the_placeholder_of_the_targets_container() {
+    let (mut m, mut f) = setup();
+    f.open.insert(BOB, "minecraft:anvil".into());
+    m.perform(&mut f, ADMIN, "Admin", "invsee Bob");
+    m.tick(&mut f);
+    let items = f.menu(ADMIN).3.clone();
+    assert_eq!(items[45].as_ref().unwrap().name.as_deref(), Some("§bAnvil input"));
+    assert_eq!(items[47].as_ref().unwrap().name.as_deref(), Some("§4"), "past the anvil's two slots");
 }

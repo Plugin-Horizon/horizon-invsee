@@ -9,6 +9,7 @@
 //! A port of InvSee++ (LGPL-2.1, Jannyboy11): its commands, messages, defaults and log formats
 //! follow the original's source (see README.md, NOTICE and STATUS.md).
 pub mod audit;
+pub mod click;
 pub mod config;
 pub mod mojang;
 pub mod names;
@@ -210,6 +211,55 @@ pub trait Host {
     fn placeholder(&self, item: &str, name: &str) -> Self::Stack;
     /// A stack's item id and count, for the log.
     fn describe(&self, stack: &Self::Stack) -> (String, u32);
+    /// Whether two stacks are the same item with the same components (counts aside).
+    fn same_stack(&self, a: &Self::Stack, b: &Self::Stack) -> bool {
+        a == b
+    }
+    /// The most items one slot holds of this stack's item.
+    fn max_stack(&self, _stack: &Self::Stack) -> u32 {
+        64
+    }
+    /// The spectator's cursor in their open view `window`: None when the game cannot read it (the view then
+    /// works with whole-stack clicks), else what is on it.
+    fn cursor(&mut self, _viewer: u128, _window: i32) -> Option<Option<Self::Stack>> {
+        None
+    }
+    /// Puts `new` on the spectator's cursor, which must hold exactly `expected`.
+    fn set_cursor(
+        &mut self,
+        _viewer: u128,
+        _window: i32,
+        _expected: Option<&Self::Stack>,
+        _new: Option<Self::Stack>,
+    ) -> Result<(), String> {
+        Err("the game cannot write the cursor".into())
+    }
+    /// Starts a group of writes that all happen or none; false when the game has no such thing.
+    fn begin(&mut self) -> bool {
+        false
+    }
+    /// Ends the group `begin` started: kept, or all put back.
+    fn end(&mut self, _commit: bool) {}
+    /// The menu type (`minecraft:anvil`) of the container `uuid` has open, None when they have none (their
+    /// inventory screen).
+    fn open_container(&self, _uuid: u128) -> Option<String> {
+        None
+    }
+    /// What the target's crafting grid (the four slots of their inventory screen) holds, when the game can
+    /// read it; and what is on their cursor.
+    fn target_extras(&mut self, _uuid: u128) -> Extras<Self::Stack> {
+        Extras::default()
+    }
+    /// A name the server's permission plugin knows for `uuid`, or the UUID of a name (`permission plugin`
+    /// strategies); None when the game has no such lookup.
+    fn permission_lookup(&mut self, _q: &Query) -> Option<(u128, String)> {
+        None
+    }
+    /// The player file of `uuid` read for its last known name, or the player whose file has `name` (`player data
+    /// save files` strategies).
+    fn save_file_lookup(&mut self, _q: &Query) -> Option<(u128, String)> {
+        None
+    }
     /// The server's folder (where usercache.json is).
     fn server_dir(&self) -> Option<PathBuf>;
     /// The mod's folder for its logs (`<world>/invsee`).
@@ -230,6 +280,13 @@ fn mojang_lookup(q: &Query, timeout: Duration) -> Lookup {
     match q {
         Query::Name(n) => Lookup::by_name(n, timeout),
         Query::Uuid(u) => Lookup::by_uuid(*u, timeout),
+    }
+}
+
+fn electroid_lookup(q: &Query, timeout: Duration) -> Lookup {
+    match q {
+        Query::Name(n) => Lookup::by_name_electroid(n, timeout),
+        Query::Uuid(u) => Lookup::by_uuid_electroid(*u, timeout),
     }
 }
 
@@ -264,6 +321,8 @@ struct Session<S> {
     /// The game's own inventory menu (`open_inventory_menu`): it follows and edits the target
     /// itself, so the mod neither refreshes nor handles its clicks (nor logs single items).
     live: bool,
+    /// A drag the spectator has started.
+    drag: Option<click::Drag>,
 }
 
 /// What a click on a view asks for.
@@ -317,17 +376,81 @@ pub fn decide(layout: &Layout, slot: i32, button: i32, mode: i32) -> Action {
     }
 }
 
-/// The item and name standing in for an empty armour or off-hand slot.
-/// The names are InvSee++'s (`internal/placeholder/Placeholders`), in its aqua colour.
-fn armour_placeholder(palette: Palette, slot: usize) -> Option<(&'static str, &'static str)> {
-    let (glass, icon, name) = match slot {
-        template::FEET => ("minecraft:light_blue_stained_glass_pane", "minecraft:chainmail_boots", "§bBoots"),
-        template::LEGS => ("minecraft:light_blue_stained_glass_pane", "minecraft:chainmail_leggings", "§bLeggings"),
-        template::CHEST => ("minecraft:light_blue_stained_glass_pane", "minecraft:chainmail_chestplate", "§bChestplate"),
-        template::HEAD => ("minecraft:light_blue_stained_glass_pane", "minecraft:chainmail_helmet", "§bHelmet"),
-        template::OFF_HAND => ("minecraft:yellow_stained_glass_pane", "minecraft:shield", "§bOff-hand"),
-        _ => return None,
-    };
+/// What the game can tell of the target beyond their two inventories.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Extras<S> {
+    /// The crafting grid of their inventory screen (its four slots), when it can be read.
+    pub grid: Option<Vec<Option<S>>>,
+    /// Their cursor, when it can be read.
+    pub cursor: Option<S>,
+}
+
+impl<S> Default for Extras<S> {
+    fn default() -> Self {
+        Extras { grid: None, cursor: None }
+    }
+}
+
+/// Which container the target's personal slots (`p_00`..`p_08`) stand for: InvSee++ picks the placeholder by the
+/// menu the target has open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Group {
+    Crafting,
+    Anvil,
+    Merchant,
+    Cartography,
+    Enchanting,
+    Grindstone,
+    Loom,
+    Smithing,
+    Stonecutter,
+}
+
+/// The group and how many personal slots the target's open menu (`None`: their inventory screen) has. Slots past
+/// that count are inaccessible; a menu with no personal slots leaves the inventory screen's grid (InvSee++'s
+/// `watch` only changes them for the menus it knows).
+pub fn personal_of(menu: Option<&str>) -> (Group, usize) {
+    match menu.map(|m| m.strip_prefix("minecraft:").unwrap_or(m)) {
+        Some("crafting") => (Group::Crafting, 9),
+        Some("anvil") => (Group::Anvil, 2),
+        Some("merchant") => (Group::Merchant, 2),
+        Some("cartography_table") => (Group::Cartography, 2),
+        Some("enchantment") => (Group::Enchanting, 2),
+        Some("grindstone") => (Group::Grindstone, 2),
+        Some("loom") => (Group::Loom, 3),
+        Some("smithing") => (Group::Smithing, 3),
+        Some("stonecutter") => (Group::Stonecutter, 1),
+        _ => (Group::Crafting, 4),
+    }
+}
+
+/// What the personal slots, the cursor and the unused slots of a view show.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Personal<S> {
+    pub group: Group,
+    /// How many personal slots work.
+    pub len: usize,
+    pub extras: Extras<S>,
+}
+
+impl<S> Personal<S> {
+    /// The personal slots of the target who has `menu` open.
+    pub fn of(menu: Option<&str>, extras: Extras<S>) -> Self {
+        let (group, len) = personal_of(menu);
+        // The grid is the inventory screen's: it is only read when that is what the target has open.
+        let extras = match menu {
+            None => extras,
+            Some(_) => Extras { grid: None, ..extras },
+        };
+        Personal { group, len, extras }
+    }
+}
+
+/// The glass pane, icon and name of a placeholder: InvSee++'s palettes (`Placeholders`), names in its aqua.
+type Ph = (&'static str, &'static str, &'static str);
+
+fn palette_pick(palette: Palette, ph: Ph) -> Option<(&'static str, &'static str)> {
+    let (glass, icon, name) = ph;
     match palette {
         Palette::GlassPanes => Some((glass, name)),
         Palette::Icons => Some((icon, name)),
@@ -335,20 +458,60 @@ fn armour_placeholder(palette: Palette, slot: usize) -> Option<(&'static str, &'
     }
 }
 
-/// The item and name standing in a slot this engine can't reach (body, saddle, cursor and the
-/// crafting grid: InvSee++ shows them too, with the same names and colours).
+/// The slot nothing can be done with (an unused cell, a personal slot past the container's).
+fn inaccessible_placeholder(palette: Palette) -> Option<(&'static str, &'static str)> {
+    palette_pick(palette, ("minecraft:black_stained_glass_pane", "minecraft:barrier", "§4"))
+}
+
+/// The item and name standing in for an empty armour or off-hand slot.
+/// The names are InvSee++'s (`internal/placeholder/Placeholders`), in its aqua colour.
+fn armour_placeholder(palette: Palette, slot: usize) -> Option<(&'static str, &'static str)> {
+    palette_pick(
+        palette,
+        match slot {
+            template::FEET => ("minecraft:light_blue_stained_glass_pane", "minecraft:chainmail_boots", "§bBoots"),
+            template::LEGS => ("minecraft:light_blue_stained_glass_pane", "minecraft:chainmail_leggings", "§bLeggings"),
+            template::CHEST => ("minecraft:light_blue_stained_glass_pane", "minecraft:chainmail_chestplate", "§bChestplate"),
+            template::HEAD => ("minecraft:light_blue_stained_glass_pane", "minecraft:chainmail_helmet", "§bHelmet"),
+            template::OFF_HAND => ("minecraft:yellow_stained_glass_pane", "minecraft:shield", "§bOff-hand"),
+            _ => return None,
+        },
+    )
+}
+
+/// The placeholder of personal slot `idx` of a container group.
+fn personal_placeholder(palette: Palette, group: Group, idx: usize) -> Option<(&'static str, &'static str)> {
+    palette_pick(
+        palette,
+        match (group, idx) {
+            (Group::Crafting, _) => ("minecraft:orange_stained_glass_pane", "minecraft:crafting_table", "§bCrafting ingredient"),
+            (Group::Anvil, _) => ("minecraft:gray_stained_glass_pane", "minecraft:anvil", "§bAnvil input"),
+            (Group::Merchant, _) => ("minecraft:lime_stained_glass_pane", "minecraft:emerald", "§bMerchant payment"),
+            (Group::Cartography, _) => ("minecraft:brown_stained_glass_pane", "minecraft:cartography_table", "§bCartography input"),
+            (Group::Enchanting, 0) => ("minecraft:blue_stained_glass_pane", "minecraft:enchanting_table", "§bEnchanting item"),
+            (Group::Enchanting, _) => ("minecraft:blue_stained_glass_pane", "minecraft:lapis_lazuli", "§bEnchanting lapis lazuli"),
+            (Group::Grindstone, _) => ("minecraft:magenta_stained_glass_pane", "minecraft:grindstone", "§bGrindstone input"),
+            (Group::Loom, _) => ("minecraft:pink_stained_glass_pane", "minecraft:loom", "§bLoom input"),
+            (Group::Smithing, 0) => ("minecraft:gray_stained_glass_pane", "minecraft:netherite_upgrade_smithing_template", "§bSmithing template"),
+            (Group::Smithing, 1) => ("minecraft:gray_stained_glass_pane", "minecraft:smithing_table", "§bSmithing item"),
+            (Group::Smithing, _) => ("minecraft:gray_stained_glass_pane", "minecraft:netherite_ingot", "§bSmithing addition"),
+            (Group::Stonecutter, _) => ("minecraft:light_gray_stained_glass_pane", "minecraft:stonecutter", "§bStonecutter input"),
+        },
+    )
+}
+
+/// The item and name standing in a slot this engine can't reach (body and saddle: InvSee++ shows them too, with
+/// the same names and colours) or that holds nothing now (the cursor).
 fn unavailable_placeholder(palette: Palette, u: Unavailable) -> Option<(&'static str, &'static str)> {
-    let (glass, icon, name) = match u {
-        Unavailable::Body => ("minecraft:gray_stained_glass_pane", "minecraft:diamond_horse_armor", "§bBody"),
-        Unavailable::Saddle => ("minecraft:orange_stained_glass_pane", "minecraft:saddle", "§bSaddle"),
-        Unavailable::Cursor => ("minecraft:white_stained_glass_pane", "minecraft:structure_void", "§bCursor"),
-        Unavailable::Crafting(_) => ("minecraft:orange_stained_glass_pane", "minecraft:crafting_table", "§bCrafting ingredient"),
-    };
-    match palette {
-        Palette::GlassPanes => Some((glass, name)),
-        Palette::Icons => Some((icon, name)),
-        Palette::Empty => None,
-    }
+    palette_pick(
+        palette,
+        match u {
+            Unavailable::Body => ("minecraft:gray_stained_glass_pane", "minecraft:diamond_horse_armor", "§bBody"),
+            Unavailable::Saddle => ("minecraft:orange_stained_glass_pane", "minecraft:saddle", "§bSaddle"),
+            Unavailable::Cursor => ("minecraft:white_stained_glass_pane", "minecraft:structure_void", "§bCursor"),
+            Unavailable::Crafting(_) => return None,
+        },
+    )
 }
 
 /// The view's items: the target's slots by the layout, placeholders where the palette says.
@@ -358,6 +521,7 @@ pub fn render<H: Host>(
     kind: Kind,
     palette: Palette,
     slots: &[Option<H::Stack>],
+    personal: &Personal<H::Stack>,
 ) -> Vec<Option<H::Stack>> {
     let ph = |p: Option<(&str, &str)>| p.map(|(item, name)| host.placeholder(item, name));
     layout
@@ -371,8 +535,26 @@ pub fn render<H: Host>(
                     None
                 }
             }),
+            Cell::Unavailable(Unavailable::Cursor) => personal
+                .extras
+                .cursor
+                .clone()
+                .or_else(|| ph(unavailable_placeholder(palette, Unavailable::Cursor))),
+            Cell::Unavailable(Unavailable::Crafting(n)) => {
+                let n = usize::from(n);
+                if n >= personal.len {
+                    ph(inaccessible_placeholder(palette))
+                } else {
+                    personal
+                        .extras
+                        .grid
+                        .as_ref()
+                        .and_then(|g| g.get(n).cloned().flatten())
+                        .or_else(|| ph(personal_placeholder(palette, personal.group, n)))
+                }
+            }
             Cell::Unavailable(u) => ph(unavailable_placeholder(palette, u)),
-            Cell::Unused => None,
+            Cell::Unused => ph(inaccessible_placeholder(palette)),
         })
         .collect()
 }
@@ -402,6 +584,8 @@ pub struct InvSee<S> {
     usercache: Usercache,
     server_dir: Option<PathBuf>,
     lookup: LookupFn,
+    /// The Electroid mirror's lookup; replaced in tests.
+    electroid: LookupFn,
     /// A config was read before (a later read that changes the usages must resend the trees).
     configured: bool,
     /// The usages changed since the trees were last sent.
@@ -432,6 +616,7 @@ impl<S: Clone + PartialEq> InvSee<S> {
             usercache: Usercache::default(),
             server_dir: None,
             lookup: mojang_lookup,
+            electroid: electroid_lookup,
             configured: false,
             usages_changed: false,
         }
@@ -598,10 +783,8 @@ impl<S: Clone + PartialEq> InvSee<S> {
         let (word, arg) = cmd.split_once(' ')?;
         let kind = command_kind(&word.to_lowercase())??;
         let level = self.view_level(kind);
-        if arg.contains(' ')
-            || !host.has_permission(player, &node(kind, "view"), level)
-            || !host.has_permission(player, "invseeplusplus.tabcomplete", level)
-        {
+        // InvSee++'s completer asks only for the tab completion permission; the command's own is the tree's.
+        if arg.contains(' ') || !host.has_permission(player, "invseeplusplus.tabcomplete", level) {
             return None;
         }
         let prefix = arg.to_lowercase();
@@ -681,7 +864,7 @@ impl<S: Clone + PartialEq> InvSee<S> {
                     .map(|o| (o.uuid, o.name.clone())),
                 (Query::Name(n), Resolver::LoggedOut) => self.seen.uuid(n),
                 (Query::Uuid(u), Resolver::LoggedOut) => self.seen.name(*u).map(|n| (*u, n)),
-                (Query::Name(n), Resolver::Usercache) => {
+                (Query::Name(n), Resolver::Usercache | Resolver::PaperCache) => {
                     // The server's profile cache first; the mod's own read of usercache.json
                     // only for a game that has no such helper.
                     host.profile_by_name(n).or_else(|| {
@@ -689,16 +872,17 @@ impl<S: Clone + PartialEq> InvSee<S> {
                         self.usercache().and_then(|d| d.uuid(&n))
                     })
                 }
-                (Query::Uuid(u), Resolver::Usercache) => {
+                (Query::Uuid(u), Resolver::Usercache | Resolver::PaperCache) => {
                     let u = *u;
                     host.profile_by_uuid(u)
                         .or_else(|| self.usercache().and_then(|d| d.name(u)))
                         .map(|n| (u, n))
                 }
-                (Query::Name(n), Resolver::Mojang) if !valid_name(n) => None,
-                (q, Resolver::Mojang) => {
+                (Query::Name(n), Resolver::Mojang | Resolver::Electroid) if !valid_name(n) => None,
+                (q, r @ (Resolver::Mojang | Resolver::Electroid)) => {
                     let timeout = Duration::from_millis(self.cfg.players.mojang_timeout_ms);
-                    let lookup = p.lookup.get_or_insert_with(|| (self.lookup)(q, timeout));
+                    let start = if r == Resolver::Mojang { self.lookup } else { self.electroid };
+                    let lookup = p.lookup.get_or_insert_with(|| start(q, timeout));
                     match lookup.poll() {
                         Poll::Pending => return Resolve::Wait,
                         Poll::Done(found) => {
@@ -716,6 +900,11 @@ impl<S: Clone + PartialEq> InvSee<S> {
                 }
                 (Query::Name(n), Resolver::Offline) => Some((names::offline_uuid(n), n.clone())),
                 (Query::Uuid(_), Resolver::Offline) => None,
+                // The permission plugin's and the save files' own records, when the game can read them.
+                (q, Resolver::PermissionPlugin) => host.permission_lookup(q),
+                (q, Resolver::PlayerData) => host.save_file_lookup(q),
+                // The proxy answers a UUID lookup over the plugin channel; the game has no way to ask it yet.
+                (_, Resolver::Proxy) => None,
             };
             if let Some((uuid, name)) = found {
                 return Resolve::Found(uuid, name);
@@ -793,7 +982,8 @@ impl<S: Clone + PartialEq> InvSee<S> {
             Kind::Ender => &self.cfg.titles.enderchest,
         }
         .replace("<player>", &name);
-        let items = render(host, &layout, p.kind, self.cfg.menu.placeholder_palette, &slots);
+        let personal = Personal::of(host.open_container(target).as_deref(), host.target_extras(target));
+        let items = render(host, &layout, p.kind, self.cfg.menu.placeholder_palette, &slots, &personal);
         // A viewer who may edit a known player gets the game's live inventory menu when there is
         // one (drag, split, armour slots as in InvSee++); placeholders are not shown there.
         let may_edit = host.has_permission(p.viewer, &node(p.kind, "edit"), self.edit_level(p.kind));
@@ -827,12 +1017,6 @@ impl<S: Clone + PartialEq> InvSee<S> {
                 }
             },
         };
-        if unknown {
-            host.tell(
-                p.viewer,
-                &format!("§e{name} has never played here: the view stays empty until they join."),
-            );
-        }
         self.sessions.push(Session {
             viewer: p.viewer,
             viewer_name: p.viewer_name.clone(),
@@ -847,10 +1031,17 @@ impl<S: Clone + PartialEq> InvSee<S> {
             taken: Vec::new(),
             given: Vec::new(),
             live,
+            drag: None,
         });
     }
 
     fn refresh<H: Host<Stack = S>>(&mut self, host: &mut H, i: usize) {
+        self.refresh_with(host, i, false);
+    }
+
+    /// The view follows the target; `force` sends the whole view even when it looks unchanged (after a click the
+    /// client may have predicted a result the server did not make).
+    fn refresh_with<H: Host<Stack = S>>(&mut self, host: &mut H, i: usize, force: bool) {
         let palette = self.cfg.menu.placeholder_palette;
         let s = &mut self.sessions[i];
         s.last_read = self.tick;
@@ -861,8 +1052,9 @@ impl<S: Clone + PartialEq> InvSee<S> {
             return;
         };
         s.unknown = false;
-        let items = render(host, &s.layout, s.kind, palette, &inv.slots);
-        if items != s.shown {
+        let personal = Personal::of(host.open_container(s.target).as_deref(), host.target_extras(s.target));
+        let items = render(host, &s.layout, s.kind, palette, &inv.slots, &personal);
+        if force || items != s.shown {
             host.set_menu_items(s.viewer, items.clone());
             s.shown = items;
         }
@@ -886,6 +1078,12 @@ impl<S: Clone + PartialEq> InvSee<S> {
             return;
         };
         if self.sessions[i].live {
+            return;
+        }
+        // A game that reads the spectator's cursor gets the whole of vanilla's click rules; otherwise a click
+        // moves a whole stack.
+        if let Some(cursor) = host.cursor(viewer, window) {
+            self.live_click(host, i, cursor, slot, button, mode);
             return;
         }
         let action = decide(&self.sessions[i].layout, slot, button, mode);
@@ -1008,6 +1206,125 @@ impl<S: Clone + PartialEq> InvSee<S> {
         }
     }
 
+    /// A click on a view whose cursor the game lets the mod read and write: vanilla's rules (pick up, put down,
+    /// merge, swap, shift click, number keys, double click, drag) on the target's slots, the spectator's
+    /// inventory and the cursor, then every changed slot written in one group (all or none).
+    fn live_click<H: Host<Stack = S>>(
+        &mut self,
+        host: &mut H,
+        i: usize,
+        cursor: Option<S>,
+        slot: i32,
+        button: i32,
+        mode: i32,
+    ) {
+        let (viewer, target, kind, window) = {
+            let s = &self.sessions[i];
+            (s.viewer, s.target, s.kind, s.window)
+        };
+        // One's own inventory is shown twice (the view and the screen under it): it is only looked at.
+        if viewer == target {
+            self.refresh_with(host, i, true);
+            return;
+        }
+        // Without the edit permission the click is cancelled and nothing is said (InvSee++'s listener); the
+        // client is sent what the view really holds.
+        if !host.has_permission(viewer, &node(kind, "edit"), self.edit_level(kind)) {
+            self.refresh_with(host, i, true);
+            return;
+        }
+        if self.sessions[i].unknown {
+            let name = self.sessions[i].target_name.clone();
+            host.tell(viewer, &format!("§c{name} never played here: nothing can be stored yet."));
+            self.refresh_with(host, i, true);
+            return;
+        }
+        let (Ok(theirs), Ok(mine)) = (host.inventory(target, kind), host.inventory(viewer, Kind::Inventory)) else {
+            self.refresh_with(host, i, true);
+            return;
+        };
+        let layout = self.sessions[i].layout.clone();
+        let (mut own, mut locked) = (Vec::new(), Vec::new());
+        for c in &layout.cells {
+            match *c {
+                Cell::Slot(t) => {
+                    own.push(theirs.slots.get(t).cloned().flatten());
+                    locked.push(false);
+                }
+                _ => {
+                    own.push(None);
+                    locked.push(true);
+                }
+            }
+        }
+        let before = click::Board {
+            own,
+            locked,
+            inv: (0..36).map(|x| mine.slots.get(x).cloned().flatten()).collect(),
+            cursor,
+        };
+        let mut after = before.clone();
+        let mut drag = self.sessions[i].drag.take();
+        let changed = click::click(&*host, &mut after, &mut drag, slot, button, mode);
+        self.sessions[i].drag = drag;
+        if !changed {
+            // The steps of a drag change nothing yet; any other click the client may have guessed wrong.
+            if mode != 5 || (button & 3) == 2 {
+                self.refresh_with(host, i, true);
+            }
+            return;
+        }
+        let mut writes: Vec<(u128, Kind, usize, Option<S>, Option<S>)> = Vec::new();
+        for (idx, c) in layout.cells.iter().enumerate() {
+            if let Cell::Slot(t) = *c {
+                if before.own[idx] != after.own[idx] {
+                    writes.push((target, kind, t, before.own[idx].clone(), after.own[idx].clone()));
+                }
+            }
+        }
+        for x in 0..36 {
+            if before.inv[x] != after.inv[x] {
+                writes.push((viewer, Kind::Inventory, x, before.inv[x].clone(), after.inv[x].clone()));
+            }
+        }
+        let atomic = host.begin();
+        let mut result: Result<(), String> = Ok(());
+        for (uuid, k, x, old, new) in &writes {
+            if let Err(e) = host.set_slot(*uuid, *k, *x, old.as_ref(), new.clone()) {
+                result = Err(e);
+                break;
+            }
+        }
+        if result.is_ok() && before.cursor != after.cursor {
+            result = host.set_cursor(viewer, window, before.cursor.as_ref(), after.cursor.clone());
+        }
+        if atomic {
+            host.end(result.is_ok());
+        }
+        if let Err(e) = result {
+            host.tell(viewer, &format!("§cNothing moved: {e}."));
+            self.refresh_with(host, i, true);
+            return;
+        }
+        let (mut t, mut g) = (Vec::new(), Vec::new());
+        for (uuid, _, _, old, new) in &writes {
+            if *uuid == target {
+                changes(&*host, old, new, &mut t, &mut g);
+            }
+        }
+        let (t, g) = net(t, g);
+        if !t.is_empty() || !g.is_empty() {
+            let s = &mut self.sessions[i];
+            s.taken.extend(t.iter().cloned());
+            s.given.extend(g.iter().cloned());
+            if self.cfg.logging.granularity == Granularity::EveryChange {
+                let (viewer_name, target_name) = (s.viewer_name.clone(), s.target_name.clone());
+                self.write_log(host, viewer, &viewer_name, &target_name, &t, &g);
+            }
+        }
+        self.refresh_with(host, i, true);
+    }
+
     /// A view closed (`native_menu_closed`): the spectator closed it, opened another or left.
     pub fn closed<H: Host<Stack = S>>(&mut self, host: &mut H, viewer: u128, window: i32) {
         if let Some(i) = self
@@ -1066,6 +1383,61 @@ impl<S: Clone + PartialEq> InvSee<S> {
     pub fn open_views(&self) -> usize {
         self.sessions.len()
     }
+}
+
+/// What one slot's change took from the target and gave to it.
+fn changes<H: Host>(
+    h: &H,
+    old: &Option<H::Stack>,
+    new: &Option<H::Stack>,
+    taken: &mut Vec<(String, u32)>,
+    given: &mut Vec<(String, u32)>,
+) {
+    match (old, new) {
+        (Some(o), Some(n)) if h.same_stack(o, n) => {
+            let (id, a) = h.describe(o);
+            let b = h.describe(n).1;
+            if b > a {
+                given.push((id, b - a));
+            } else if a > b {
+                taken.push((id, a - b));
+            }
+        }
+        (o, n) => {
+            if let Some(o) = o {
+                taken.push(h.describe(o));
+            }
+            if let Some(n) = n {
+                given.push(h.describe(n));
+            }
+        }
+    }
+}
+
+/// Taken and given, each item counted once: what moved inside the target's slots cancels out.
+fn net(taken: Vec<(String, u32)>, given: Vec<(String, u32)>) -> (Vec<(String, u32)>, Vec<(String, u32)>) {
+    let mut totals: Vec<(String, i64)> = Vec::new();
+    for (id, n) in taken {
+        match totals.iter_mut().find(|(i, _)| *i == id) {
+            Some(t) => t.1 -= i64::from(n),
+            None => totals.push((id, -i64::from(n))),
+        }
+    }
+    for (id, n) in given {
+        match totals.iter_mut().find(|(i, _)| *i == id) {
+            Some(t) => t.1 += i64::from(n),
+            None => totals.push((id, i64::from(n))),
+        }
+    }
+    let (mut t, mut g) = (Vec::new(), Vec::new());
+    for (id, n) in totals {
+        if n < 0 {
+            t.push((id, n.unsigned_abs() as u32));
+        } else if n > 0 {
+            g.push((id, n as u32));
+        }
+    }
+    (t, g)
 }
 
 enum Resolve {

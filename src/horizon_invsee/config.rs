@@ -32,10 +32,35 @@ pub struct Access {
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Resolver {
+    /// A player who is on (`online player`).
+    #[serde(rename = "online", alias = "online player")]
     Online,
+    /// Players seen since the start (`logged out players cache`).
+    #[serde(rename = "logged_out", alias = "logged out players cache")]
     LoggedOut,
+    /// The server's user cache (`usercache.json`).
+    #[serde(rename = "usercache")]
     Usercache,
+    /// Paper's offline player cache (`paper offline player cache`): the server's user cache here.
+    #[serde(rename = "paper_offline_player_cache", alias = "paper offline player cache")]
+    PaperCache,
+    /// The permission plugin's own records (`permission plugin`).
+    #[serde(rename = "permission_plugin", alias = "permission plugin")]
+    PermissionPlugin,
+    /// The proxy's (`proxy`).
+    #[serde(rename = "proxy")]
+    Proxy,
+    /// Mojang's API (`mojang rest api call`).
+    #[serde(rename = "mojang", alias = "mojang rest api call")]
     Mojang,
+    /// The Electroid mirror of Mojang's API (`electroid mojang api call`).
+    #[serde(rename = "electroid", alias = "electroid mojang api call")]
+    Electroid,
+    /// The players' save files (`player data save files`).
+    #[serde(rename = "player_data", alias = "player data save files")]
+    PlayerData,
+    /// The offline-mode UUID of a name (`spoof`).
+    #[serde(rename = "offline", alias = "spoof")]
     Offline,
 }
 

@@ -10,7 +10,8 @@ pub mod horizon_invsee;
 use crate::horizon_invsee::{self as inv, Kind};
 use mod_api::{
     Command, CommandArgumentValue, CommandInvocation, CommandSource, Compound, Config, ConfigKind,
-    ConfigLoadingEvent, ConfigReloadingEvent, Flow, HostSide, Hooks, Identifier, ItemStack,
+    ConfigLoadingEvent, ConfigReloadingEvent, Flow, HostSide, HostTransaction, Hooks, Identifier, ItemPlace,
+    ItemResource, ItemStack, PlayerContainerCloseEvent, PlayerContainerOpenEvent, TransactionSeal,
     MenuClickedEvent, MenuClosedEvent, MenuReplace, NodeDefault, PermissionGatherNodesEvent,
     PermissionLevel, PermissionNode, PermissionValueType, PlayerCommandEvent, PlayerLoggedInEvent,
     PlayerLoggedOutEvent, RegisterCommandsEvent, RegisterConfigsEvent, RunModCommandEvent,
@@ -42,6 +43,10 @@ const PLUS_WORDS: [&str; 2] = ["invsee++reload", "is++reload"];
 /// The mod's state, one per process (a dedicated server runs one world). Hooks take it with
 /// `try_lock`: a call that re-enters a hook while it is in use is deferred to the next tick.
 static STATE: Mutex<Option<inv::InvSee<ItemStack>>> = Mutex::new(None);
+
+/// The menu type each player has open (from `player_container_open`), so the target's personal slots show the
+/// placeholder of their container.
+static OPEN: Mutex<BTreeMap<u128, String>> = Mutex::new(BTreeMap::new());
 
 /// Menu events that arrived while `STATE` was in use further up the same thread.
 static DEFERRED: Mutex<Vec<Deferred>> = Mutex::new(Vec::new());
@@ -109,6 +114,71 @@ fn level_dir() -> PathBuf {
 /// The game, as the core sees it: `host` is the server of the hook that asked.
 struct GameHost<'a> {
     host: &'a mut dyn ServerHost,
+    /// The groups of writes `begin` opened and `end` has not closed.
+    seals: Vec<TransactionSeal>,
+}
+
+impl<'a> GameHost<'a> {
+    fn new(host: &'a mut dyn ServerHost) -> Self {
+        GameHost { host, seals: Vec::new() }
+    }
+}
+
+/// The permission nodes that grant `node` too (plugin.yml `children`: `edit` gives `view`, `view` gives
+/// `tabcomplete`, the aggregate nodes give their kind). `invseeplusplus.*` cannot be named as a typed node.
+fn granting(node: &str) -> Vec<&str> {
+    match node {
+        "invseeplusplus.invsee.view" => vec![node, "invseeplusplus.invsee.edit", "invseeplusplus.view", "invseeplusplus.edit"],
+        "invseeplusplus.endersee.view" => vec![node, "invseeplusplus.endersee.edit", "invseeplusplus.view", "invseeplusplus.edit"],
+        "invseeplusplus.invsee.edit" | "invseeplusplus.endersee.edit" => vec![node, "invseeplusplus.edit"],
+        "invseeplusplus.tabcomplete" => vec![
+            node,
+            "invseeplusplus.invsee.view",
+            "invseeplusplus.endersee.view",
+            "invseeplusplus.invsee.edit",
+            "invseeplusplus.endersee.edit",
+            "invseeplusplus.view",
+            "invseeplusplus.edit",
+        ],
+        "invseeplusplus.exempt.invsee" | "invseeplusplus.exempt.endersee" => vec![node, "invseeplusplus.exempt"],
+        "invseeplusplus.bypass-exempt.invsee" | "invseeplusplus.bypass-exempt.endersee" => {
+            vec![node, "invseeplusplus.bypass-exempt"]
+        }
+        _ => vec![node],
+    }
+}
+
+/// Whether `uuid` holds `node` or a node that grants it; any error is a denial.
+fn has(host: &mut dyn ServerHost, uuid: u128, node: &str) -> bool {
+    let Some(player) = host.player(uuid) else {
+        return false;
+    };
+    granting(node)
+        .into_iter()
+        .any(|n| player.permission_bool(&mut *host, &bool_node(n)).unwrap_or(false))
+}
+
+/// The colour a `§` code names.
+fn legacy_colour(code: char) -> Option<&'static str> {
+    Some(match code {
+        '0' => "black",
+        '1' => "dark_blue",
+        '2' => "dark_green",
+        '3' => "dark_aqua",
+        '4' => "dark_red",
+        '5' => "dark_purple",
+        '6' => "gold",
+        '7' => "gray",
+        '8' => "dark_gray",
+        '9' => "blue",
+        'a' => "green",
+        'b' => "aqua",
+        'c' => "red",
+        'd' => "light_purple",
+        'e' => "yellow",
+        'f' => "white",
+        _ => return None,
+    })
 }
 
 impl inv::Host for GameHost<'_> {
@@ -243,10 +313,80 @@ impl inv::Host for GameHost<'_> {
     /// The permission node's answer from the server's handler. The node's default is its shipped level
     /// (`permission_gather_nodes`), so the config's `default_level` is not read here; a refused query is a denial.
     fn has_permission(&mut self, uuid: u128, node: &str, _default_level: u8) -> bool {
+        has(&mut *self.host, uuid, node)
+    }
+
+    fn same_stack(&self, a: &ItemStack, b: &ItemStack) -> bool {
+        a.same_item(b) && a.same_components(b)
+    }
+
+    fn max_stack(&self, stack: &ItemStack) -> u32 {
+        self.host.max_stack_size(stack.item()).map(|n| n as u32).unwrap_or(64)
+    }
+
+    fn cursor(&mut self, viewer: u128, window: i32) -> Option<Option<ItemStack>> {
+        let menu = self.host.menu(viewer, window)?;
+        Some(menu.cursor().stack(&mut *self.host))
+    }
+
+    fn set_cursor(
+        &mut self,
+        viewer: u128,
+        window: i32,
+        expected: Option<&ItemStack>,
+        new: Option<ItemStack>,
+    ) -> Result<(), String> {
+        let menu = self.host.menu(viewer, window).ok_or("the view is gone")?;
+        let place = menu.cursor();
+        let host: &mut dyn ServerHost = &mut *self.host;
+        host.transaction(|host, tx| -> Result<(), String> {
+            if let Some(old) = expected {
+                let n = old.count();
+                if place.extract(host, tx, &ItemResource::of(old), n) != n {
+                    return Err("the cursor changed".into());
+                }
+            }
+            if let Some(stack) = &new {
+                let n = stack.count();
+                if place.insert(host, tx, &ItemResource::of(stack), n) != n {
+                    return Err("the cursor takes no more".into());
+                }
+            }
+            Ok(())
+        })
+    }
+
+    fn begin(&mut self) -> bool {
+        let seal = self.host.transaction_open();
+        self.seals.push(seal);
+        true
+    }
+
+    fn end(&mut self, commit: bool) {
+        if let Some(seal) = self.seals.pop() {
+            self.host.transaction_close(&seal, commit);
+        }
+    }
+
+    fn open_container(&self, uuid: u128) -> Option<String> {
+        OPEN.lock().unwrap_or_else(|e| e.into_inner()).get(&uuid).cloned()
+    }
+
+    /// The target's crafting grid and cursor, read from their inventory screen (the only menu the game lends).
+    fn target_extras(&mut self, uuid: u128) -> inv::Extras<ItemStack> {
+        if OPEN.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&uuid) {
+            return inv::Extras::default();
+        }
         let Some(player) = self.host.player(uuid) else {
-            return false;
+            return inv::Extras::default();
         };
-        player.permission_bool(&mut *self.host, &bool_node(node)).unwrap_or(false)
+        let Some(menu) = player.container_menu(&*self.host) else {
+            return inv::Extras::default();
+        };
+        let grid = (1..=4)
+            .map(|slot| ItemPlace::MenuSlot { menu, slot }.stack(&mut *self.host))
+            .collect();
+        inv::Extras { grid: Some(grid), cursor: menu.cursor().stack(&mut *self.host) }
     }
 
     fn refresh_commands(&mut self) {
@@ -288,10 +428,11 @@ impl inv::Host for GameHost<'_> {
             })
             .expect("minecraft:barrier is a vanilla item");
         let mut stack = ItemStack::of(key);
-        // The name is a text component (`minecraft:custom_name`): InvSee++'s names are `§b<name>` (aqua), not italic.
-        let (color, plain) = match name.strip_prefix("\u{a7}b") {
-            Some(rest) => (Some("aqua"), rest),
-            None => (None, name),
+        // The name is a text component (`minecraft:custom_name`): InvSee++'s names are `§<colour><name>`, not italic.
+        let mut chars = name.chars();
+        let (color, plain) = match (chars.next(), chars.next()) {
+            (Some('\u{a7}'), Some(code)) if legacy_colour(code).is_some() => (legacy_colour(code), &name[3..]),
+            _ => (None, name),
         };
         let mut text: Compound = [
             ("text".into(), Tag::String(plain.into())),
@@ -301,7 +442,45 @@ impl inv::Host for GameHost<'_> {
         if let Some(color) = color {
             text.insert("color".into(), Tag::String(color.into()));
         }
-        let patch: Compound = [("minecraft:custom_name".into(), Tag::Compound(text))].into();
+        // Every placeholder carries InvSee++'s lore line.
+        let lore: Compound = [("text".into(), Tag::String("InvSee++ placeholder".into()))].into();
+        let mut patch: Compound = [
+            ("minecraft:custom_name".into(), Tag::Compound(text)),
+            ("minecraft:lore".into(), Tag::List(vec![Tag::Compound(lore)])),
+        ]
+        .into();
+        // The icon palette hides the armour's attributes; the off-hand icon is a banner-patterned shield.
+        let base = item.strip_prefix("minecraft:").unwrap_or(item);
+        let hidden: Option<&[&str]> = match base {
+            "chainmail_helmet" | "chainmail_chestplate" | "chainmail_leggings" | "chainmail_boots" => {
+                Some(&["minecraft:attribute_modifiers"])
+            }
+            "shield" => Some(&["minecraft:attribute_modifiers", "minecraft:dyed_color"]),
+            _ => None,
+        };
+        if let Some(hidden) = hidden {
+            let tooltip: Compound = [(
+                "hidden_components".into(),
+                Tag::List(hidden.iter().map(|h| Tag::String((*h).into())).collect()),
+            )]
+            .into();
+            patch.insert("minecraft:tooltip_display".into(), Tag::Compound(tooltip));
+        }
+        if base == "shield" {
+            let stripe = |pattern: &str, color: &str| {
+                let c: Compound = [
+                    ("pattern".into(), Tag::String(pattern.into())),
+                    ("color".into(), Tag::String(color.into())),
+                ]
+                .into();
+                Tag::Compound(c)
+            };
+            patch.insert("minecraft:base_color".into(), Tag::String("white".into()));
+            patch.insert(
+                "minecraft:banner_patterns".into(),
+                Tag::List(vec![stripe("minecraft:stripe_top", "red"), stripe("minecraft:stripe_bottom", "blue")]),
+            );
+        }
         let _ = stack.apply_components(&patch);
         stack
     }
@@ -362,6 +541,11 @@ fn permission_nodes() -> Vec<(&'static str, i32)> {
         ("invseeplusplus.bypass-exempt.endersee", 4),
         ("invseeplusplus.exempt.invsee", 4),
         ("invseeplusplus.exempt.endersee", 4),
+        // The aggregate nodes of plugin.yml: holding one grants its children (see `granting`).
+        ("invseeplusplus.view", access.invsee_view.min(access.endersee_view) as i32),
+        ("invseeplusplus.edit", access.invsee_edit.min(access.endersee_edit) as i32),
+        ("invseeplusplus.exempt", 4),
+        ("invseeplusplus.bypass-exempt", 4),
     ]
 }
 
@@ -380,7 +564,7 @@ fn perform(host: &mut dyn ServerHost, uuid: u128, name: &str, line: &str) -> Opt
 
 /// As `perform`, but the outer None says the state was in use (the caller defers the command).
 fn perform_try(host: &mut dyn ServerHost, uuid: u128, name: &str, line: &str) -> Option<Option<Vec<String>>> {
-    let mut game = GameHost { host };
+    let mut game = GameHost::new(host);
     with(|m| m.perform(&mut game, uuid, name, line))
 }
 
@@ -489,9 +673,7 @@ impl Hooks for Mod {
             // Same node as `isppreload`; permitted players get the reload, others Bukkit's text.
             let uuid = event.player;
             let name = host.player(uuid).and_then(|p| p.name(&*host)).unwrap_or_default();
-            let allowed = host
-                .player(uuid)
-                .is_some_and(|p| p.permission_bool(&mut *host, &bool_node("invseeplusplus.reload")).unwrap_or(false));
+            let allowed = has(host, uuid, "invseeplusplus.reload");
             event.cancelled = true;
             if allowed {
                 for l in perform(host, uuid, &name, "invseeplusplusreload").unwrap_or_default() {
@@ -508,11 +690,8 @@ impl Hooks for Mod {
         if !OWN_WORDS.contains(&root.as_str()) {
             return Flow::Continue;
         }
-        let node = bool_node(node_of_word(&root));
         let uuid = event.player;
-        let allowed = host
-            .player(uuid)
-            .is_some_and(|p| p.permission_bool(&mut *host, &node).unwrap_or(false));
+        let allowed = has(host, uuid, node_of_word(&root));
         if allowed {
             return Flow::Continue;
         }
@@ -566,7 +745,7 @@ impl Hooks for Mod {
     }
 
     fn tab_complete(&self, host: &mut dyn ServerHost, event: &mut TabCompleteEvent<'_>) {
-        let mut game = GameHost { host };
+        let mut game = GameHost::new(host);
         let Some(Some((start, names))) =
             with(|m| m.tab_complete(&mut game, event.player, event.command))
         else {
@@ -582,7 +761,7 @@ impl Hooks for Mod {
 
     fn server_tick(&self, host: &mut dyn ServerHost, event: &mut ServerTickEvent<'_>) {
         if matches!(event.phase, ServerTickPhase::ServerTickEnd { .. }) {
-            let mut game = GameHost { host };
+            let mut game = GameHost::new(host);
             tick(&mut game);
         }
     }
@@ -590,7 +769,7 @@ impl Hooks for Mod {
     fn menu_clicked(&self, host: &mut dyn ServerHost, event: &mut MenuClickedEvent) {
         let (uuid, window, slot, button, mode) =
             (event.uuid, event.window, event.slot, event.button, event.mode);
-        let mut game = GameHost { host };
+        let mut game = GameHost::new(host);
         if with(|m| m.clicked(&mut game, uuid, window, slot, button, mode)).is_none() {
             defer(Deferred::Clicked(uuid, window, slot, button, mode));
         }
@@ -604,10 +783,18 @@ impl Hooks for Mod {
                 windows.remove(&uuid);
             }
         }
-        let mut game = GameHost { host };
+        let mut game = GameHost::new(host);
         if with(|m| m.closed(&mut game, uuid, window)).is_none() {
             defer(Deferred::Closed(uuid, window));
         }
+    }
+
+    fn player_container_open(&self, _: &mut dyn ServerHost, event: &mut PlayerContainerOpenEvent<'_>) {
+        OPEN.lock().unwrap_or_else(|e| e.into_inner()).insert(event.player, event.menu.to_owned());
+    }
+
+    fn player_container_close(&self, _: &mut dyn ServerHost, event: &mut PlayerContainerCloseEvent<'_>) {
+        OPEN.lock().unwrap_or_else(|e| e.into_inner()).remove(&event.player);
     }
 
     fn player_logged_in(&self, _: &mut dyn ServerHost, event: &mut PlayerLoggedInEvent<'_>) {
@@ -619,7 +806,7 @@ impl Hooks for Mod {
     }
 
     fn server_stopping(&self, host: &mut dyn ServerHost, _: &mut ServerStoppingEvent) {
-        let mut game = GameHost { host };
+        let mut game = GameHost::new(host);
         with(|m| m.stopping(&mut game));
     }
 }

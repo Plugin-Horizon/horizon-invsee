@@ -84,8 +84,12 @@ horizon-launcher native-build <path to this folder> --server-output <dir> --vers
 
 What does not work yet on arismoko/horizon (each is marked `TODO(arismoko-api: ...)` in `src/lib.rs`):
 
-- Offline players' inventories cannot be read (a mod cannot read the player file yet).
-- The view is a snapshot taken when it opens; there is no live menu over the target's slots yet.
+- Offline players' inventories cannot be read or written (a mod cannot read the player file yet).
+- The view follows the target every tick and clicks use vanilla's rules (cursor, drag, shift click, number keys,
+  double click), but it is the mod's own menu, not the target's container: throws and middle clicks do nothing, and
+  the target's cursor and crafting grid are shown, not edited.
+- The target's anvil, merchant and other workstation inputs cannot be read (only their placeholders are shown).
+- The `permission plugin`, `proxy` and `player data save files` resolve strategies answer nothing.
 - Log lines go to stderr, not to the server's log file.
 
 ## Licence
