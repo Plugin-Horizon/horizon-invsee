@@ -89,8 +89,12 @@ What does not work yet on arismoko/horizon (each is marked `TODO(arismoko-api: .
   double click), but it is the mod's own menu, not the target's container: throws and middle clicks do nothing, and
   the target's cursor and crafting grid are shown, not edited.
 - The target's anvil, merchant and other workstation inputs cannot be read (only their placeholders are shown).
-- The `permission plugin`, `proxy` and `player data save files` resolve strategies answer nothing.
-- Log lines go to stderr, not to the server's log file.
+- The `permission plugin` and `proxy` resolve strategies answer nothing. `player data` answers from `usercache.json`
+  (the last known names of players who were on), not from the save files.
+- Log lines (the server log and console outputs, and the reasons of failed reads) go to stderr, not to the server's log file.
+- The `invseeplusplus.*` wildcard cannot be checked (typed nodes have no wildcard name); a permission mod answering it is not seen.
+- A never-played player's view refuses clicks with its own text (`... nothing can be stored yet`): InvSee++ stores
+  there, which needs the offline write API.
 
 ## Licence
 
