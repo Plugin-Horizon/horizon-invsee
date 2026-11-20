@@ -24,15 +24,23 @@ offline = true
 unknown = true
 # Complete the names of offline players in /invsee and /endersee.
 tabcomplete_offline = true
-# How a typed name becomes a UUID, tried in this order:
-#   online      a player on the server
-#   logged_out  a player who left since the server started
-#   usercache   the server's usercache.json
-#   mojang      Mojang's profile API (a request on a thread of its own)
-#   offline     the offline-mode UUID of the name (UUID v3 of "OfflinePlayer:<name>")
-uuid_resolve = ["online", "logged_out", "usercache", "mojang"]
-# How a typed UUID gets a name for the title: online, logged_out, usercache, mojang.
-name_resolve = ["online", "logged_out", "usercache", "mojang"]
+# How a typed name becomes a UUID, tried in this order. The original's own spellings ("online player",
+# "logged out players cache", "paper offline player cache", "permission plugin", "mojang rest api call",
+# "electroid mojang api call", "player data save files", "spoof") work too:
+#   online                      a player on the server
+#   logged_out                  a player who left since the server started
+#   usercache                   the server's usercache.json
+#   paper_offline_player_cache  the same cache (Paper's name for it)
+#   permission_plugin           the permission mod's records (the game offers no lookup yet: answers nothing)
+#   proxy                       the proxy (no way to ask it yet: answers nothing)
+#   mojang                      Mojang's profile API (a request on a thread of its own)
+#   electroid                   the Electroid mirror of that API
+#   player_data                 the players' save files (the game offers no lookup yet: answers nothing)
+#   offline                     the offline-mode UUID of the name (UUID v3 of "OfflinePlayer:<name>")
+uuid_resolve = ["online", "logged_out", "paper_offline_player_cache", "permission_plugin", "proxy", "mojang", "player_data"]
+# How a typed UUID gets a name for the title: online, logged_out, usercache, paper_offline_player_cache,
+# permission_plugin, mojang, electroid, player_data.
+name_resolve = ["online", "logged_out", "permission_plugin", "mojang", "player_data"]
 # How long a Mojang request may take, in milliseconds.
 mojang_timeout_ms = 5000
 # How often an open view of an offline player is read again from the file, in ticks.

@@ -38,6 +38,11 @@ struct Fake {
     /// Profiles the server's cache holds.
     profiles: Vec<(u128, String)>,
     refreshed: u32,
+    /// The game lets the mod read and write the spectator's cursor.
+    cursor_mode: bool,
+    cursors: HashMap<u128, Option<St>>,
+    open: HashMap<u128, String>,
+    grids: HashMap<u128, Vec<Option<St>>>,
 }
 
 const ADMIN: u128 = 1;
@@ -192,7 +197,7 @@ impl Host for Fake {
     fn profile_by_uuid(&self, uuid: u128) -> Option<String> {
         self.profiles.iter().find(|(u, _)| *u == uuid).map(|(_, n)| n.clone())
     }
-    fn has_permission(&self, uuid: u128, node: &str, default_level: u8) -> bool {
+    fn has_permission(&mut self, uuid: u128, node: &str, default_level: u8) -> bool {
         self.perms.get(&(uuid, node.to_owned())).copied().unwrap_or_else(|| {
             self.players.iter().find(|o| o.uuid == uuid).map_or(0, |o| o.level) >= default_level
         })
@@ -229,6 +234,28 @@ impl Host for Fake {
             count: 1,
             name: Some(name.into()),
         }
+    }
+    fn same_stack(&self, a: &St, b: &St) -> bool {
+        a.item == b.item && a.name == b.name
+    }
+    fn cursor(&mut self, viewer: u128, _window: i32) -> Option<Option<St>> {
+        self.cursor_mode.then(|| self.cursors.get(&viewer).cloned().flatten())
+    }
+    fn set_cursor(&mut self, viewer: u128, _w: i32, expected: Option<&St>, new: Option<St>) -> Result<(), String> {
+        if self.cursors.get(&viewer).cloned().flatten().as_ref() != expected {
+            return Err("the cursor changed".into());
+        }
+        self.cursors.insert(viewer, new);
+        Ok(())
+    }
+    fn begin(&mut self) -> bool {
+        true
+    }
+    fn open_container(&self, uuid: u128) -> Option<String> {
+        self.open.get(&uuid).cloned()
+    }
+    fn target_extras(&mut self, uuid: u128) -> Extras<St> {
+        Extras { grid: self.grids.get(&uuid).cloned(), cursor: self.cursors.get(&uuid).cloned().flatten() }
     }
     fn describe(&self, s: &St) -> (String, u32) {
         (s.item.clone(), s.count)
@@ -269,7 +296,7 @@ fn invsee_opens_a_live_view_of_an_online_player() {
     let (mut m, mut f) = setup();
     f.set(BOB, Kind::Inventory, 0, Some(st("diamond_sword", 1)));
     f.set(BOB, Kind::Inventory, 39, Some(st("iron_helmet", 1)));
-    assert_eq!(m.perform(&f, ADMIN, "Admin", "invsee bob"), Some(vec![]));
+    assert_eq!(m.perform(&mut f, ADMIN, "Admin", "invsee bob"), Some(vec![]));
     assert!(f.menus.is_empty(), "opens on the tick, not inside the command");
     m.tick(&mut f);
     let (_, rows, title, items) = f.menu(ADMIN).clone();
@@ -281,7 +308,7 @@ fn invsee_opens_a_live_view_of_an_online_player() {
     assert_eq!(items[36].as_ref().unwrap().name.as_deref(), Some("§bBoots"));
     assert_eq!(items[36].as_ref().unwrap().item, "minecraft:light_blue_stained_glass_pane");
     assert_eq!(items[43].as_ref().unwrap().name.as_deref(), Some("§bCursor"));
-    assert_eq!(items[44], None);
+    assert_eq!(items[44].as_ref().unwrap().name.as_deref(), Some("§4"), "an unused cell is inaccessible");
     // Bob picks something up: the view follows on the next tick.
     f.set(BOB, Kind::Inventory, 5, Some(st("bread", 3)));
     m.tick(&mut f);
@@ -293,7 +320,7 @@ fn a_click_takes_and_a_click_below_gives_and_the_close_is_logged() {
     let (mut m, mut f) = setup();
     f.set(BOB, Kind::Inventory, 3, Some(st("diamond", 5)));
     f.set(ADMIN, Kind::Inventory, 0, Some(st("stone", 64)));
-    m.perform(&f, ADMIN, "Admin", "invsee Bob");
+    m.perform(&mut f, ADMIN, "Admin", "invsee Bob");
     m.tick(&mut f);
     let window = f.menu(ADMIN).0;
     // Left click on Bob's slot 3: the diamonds go to the admin.
@@ -319,7 +346,7 @@ fn a_click_takes_and_a_click_below_gives_and_the_close_is_logged() {
 fn a_number_key_takes_or_gives_the_hotbar_slot() {
     let (mut m, mut f) = setup();
     f.set(ADMIN, Kind::Inventory, 2, Some(st("apple", 7)));
-    m.perform(&f, ADMIN, "Admin", "invsee Bob");
+    m.perform(&mut f, ADMIN, "Admin", "invsee Bob");
     m.tick(&mut f);
     let w = f.menu(ADMIN).0;
     // Key 3 over Bob's empty slot 10: the admin's hotbar slot 2 goes to Bob.
@@ -342,7 +369,7 @@ fn a_viewer_below_the_edit_level_only_looks() {
     let (mut m, mut f) = setup();
     m.load_config("[access]\ninvsee_view = 1\ninvsee_edit = 3\n", None);
     f.set(BOB, Kind::Inventory, 0, Some(st("diamond", 1)));
-    m.perform(&f, HELPER, "Helper", "isee Bob");
+    m.perform(&mut f, HELPER, "Helper", "isee Bob");
     m.tick(&mut f);
     let w = f.menu(HELPER).0;
     m.clicked(&mut f, HELPER, w, 0, 0, 0);
@@ -350,7 +377,7 @@ fn a_viewer_below_the_edit_level_only_looks() {
     assert_eq!(f.get(BOB, Kind::Inventory, 0), Some(st("diamond", 1)));
     assert!(f.told(HELPER).is_empty(), "silent, as InvSee++: {:?}", f.told(HELPER));
     // Below the view level: refused at the command, with Bukkit's permission message.
-    let r = m.perform(&f, BOB, "Bob", "invsee Helper").unwrap();
+    let r = m.perform(&mut f, BOB, "Bob", "invsee Helper").unwrap();
     assert!(r[0].contains("do not have permission"), "{r:?}");
 }
 
@@ -358,7 +385,7 @@ fn a_viewer_below_the_edit_level_only_looks() {
 fn endersee_shows_three_rows_and_edits_the_ender_chest() {
     let (mut m, mut f) = setup();
     f.set(BOB, Kind::Ender, 26, Some(st("elytra", 1)));
-    m.perform(&f, ADMIN, "Admin", "esee Bob");
+    m.perform(&mut f, ADMIN, "Admin", "esee Bob");
     m.tick(&mut f);
     let (w, rows, title, items) = f.menu(ADMIN).clone();
     assert_eq!((rows, title.as_str()), (3, "Bob's enderchest"));
@@ -381,7 +408,7 @@ fn offline_players_are_found_in_the_usercache_and_read_from_their_file() {
     )
     .unwrap();
     f.set(CAROL, Kind::Inventory, 8, Some(st("torch", 32)));
-    m.perform(&f, ADMIN, "Admin", "invsee carol");
+    m.perform(&mut f, ADMIN, "Admin", "invsee carol");
     m.tick(&mut f);
     assert_eq!(f.menu(ADMIN).2, "Carol's inventory");
     assert_eq!(f.menu(ADMIN).3[8], Some(st("torch", 32)));
@@ -395,7 +422,7 @@ fn offline_players_are_found_in_the_usercache_and_read_from_their_file() {
     assert_eq!(f.menu(ADMIN).3[7], Some(st("stick", 1)));
     // With offline support off, the same command is refused.
     m.load_config("[players]\noffline = false\n", None);
-    m.perform(&f, ADMIN, "Admin", "invsee Carol");
+    m.perform(&mut f, ADMIN, "Admin", "invsee Carol");
     m.tick(&mut f);
     assert!(f.told(ADMIN).iter().any(|l| l.contains("is disabled")), "{:?}", f.told);
 }
@@ -404,10 +431,10 @@ fn offline_players_are_found_in_the_usercache_and_read_from_their_file() {
 fn a_uuid_works_and_a_player_who_left_keeps_their_name() {
     let (mut m, mut f) = setup();
     m.logged_out(CAROL, "Carol");
-    m.perform(&f, ADMIN, "Admin", "invsee 00000000-0000-0000-0000-000000000004");
+    m.perform(&mut f, ADMIN, "Admin", "invsee 00000000-0000-0000-0000-000000000004");
     m.tick(&mut f);
     assert_eq!(f.menu(ADMIN).2, "Carol's inventory");
-    m.perform(&f, ADMIN, "Admin", "invsee CAROL");
+    m.perform(&mut f, ADMIN, "Admin", "invsee CAROL");
     m.tick(&mut f);
     assert_eq!(f.menu(ADMIN).2, "Carol's inventory");
 }
@@ -417,10 +444,10 @@ fn unknown_names_are_asked_of_mojang_and_never_played_players_get_an_empty_view(
     let mut m = InvSee::<St>::new().with_lookup(mojang_knows_dave);
     let mut f = Fake::new();
     m.tick(&mut f);
-    m.perform(&f, ADMIN, "Admin", "invsee nobody_here");
+    m.perform(&mut f, ADMIN, "Admin", "invsee nobody_here");
     m.tick(&mut f);
     assert!(f.told(ADMIN).iter().any(|l| l.contains("does not exist")), "{:?}", f.told);
-    m.perform(&f, ADMIN, "Admin", "invsee dave");
+    m.perform(&mut f, ADMIN, "Admin", "invsee dave");
     m.tick(&mut f);
     let (w, _, title, items) = f.menu(ADMIN).clone();
     assert_eq!(title, "Dave's inventory");
@@ -430,7 +457,7 @@ fn unknown_names_are_asked_of_mojang_and_never_played_players_get_an_empty_view(
     assert_eq!(f.get(ADMIN, Kind::Inventory, 0), Some(st("stone", 1)), "nothing stored");
     // With unknown players off, the view doesn't open.
     m.load_config("[players]\nunknown = false\n", None);
-    m.perform(&f, ADMIN, "Admin", "invsee dave");
+    m.perform(&mut f, ADMIN, "Admin", "invsee dave");
     m.tick(&mut f);
     assert!(f.told(ADMIN).iter().any(|l| l.contains("has not logged onto the server yet")), "{:?}", f.told);
 }
@@ -444,7 +471,7 @@ fn offline_uuids_are_the_last_resort_when_listed() {
     f.invs.insert((ghost, Kind::Inventory), vec![Some(st("bone", 2)); 41]);
     m.load_config("[players]\nuuid_resolve = [\"online\", \"mojang\", \"offline\"]\n", None);
     m.tick(&mut f);
-    m.perform(&f, ADMIN, "Admin", "invsee Ghost");
+    m.perform(&mut f, ADMIN, "Admin", "invsee Ghost");
     m.tick(&mut f);
     assert_eq!(f.menu(ADMIN).3[0], Some(st("bone", 2)));
 }
@@ -456,11 +483,11 @@ fn exempt_players_need_the_bypass_level() {
         "[access]\ninvsee_view = 1\nbypass_exempt = 4\nexempt_invsee = [\"bob\"]\nexempt_endersee = [\"00000000-0000-0000-0000-000000000002\"]\n",
         None,
     );
-    m.perform(&f, HELPER, "Helper", "invsee Bob");
+    m.perform(&mut f, HELPER, "Helper", "invsee Bob");
     m.tick(&mut f);
     assert!(!f.menus.contains_key(&HELPER));
     assert!(f.told(HELPER)[0].contains("exempted"));
-    m.perform(&f, ADMIN, "Admin", "endersee Bob");
+    m.perform(&mut f, ADMIN, "Admin", "endersee Bob");
     m.tick(&mut f);
     assert!(f.menus.contains_key(&ADMIN), "the bypass level opens it");
 }
@@ -468,9 +495,9 @@ fn exempt_players_need_the_bypass_level() {
 #[test]
 fn a_new_view_ends_the_old_and_a_leaving_spectator_ends_theirs() {
     let (mut m, mut f) = setup();
-    m.perform(&f, ADMIN, "Admin", "invsee Bob");
+    m.perform(&mut f, ADMIN, "Admin", "invsee Bob");
     m.tick(&mut f);
-    m.perform(&f, ADMIN, "Admin", "endersee Bob");
+    m.perform(&mut f, ADMIN, "Admin", "endersee Bob");
     m.tick(&mut f);
     assert_eq!(m.open_views(), 1);
     f.players.retain(|p| p.uuid != ADMIN);
@@ -486,7 +513,7 @@ fn every_change_logging_writes_each_move_to_the_console() {
         None,
     );
     f.set(BOB, Kind::Inventory, 0, Some(st("coal", 9)));
-    m.perform(&f, ADMIN, "Admin", "invsee Bob");
+    m.perform(&mut f, ADMIN, "Admin", "invsee Bob");
     m.tick(&mut f);
     let w = f.menu(ADMIN).0;
     m.clicked(&mut f, ADMIN, w, 0, 0, 0);
@@ -502,7 +529,7 @@ fn a_full_inventory_moves_nothing_and_says_so() {
         f.set(ADMIN, Kind::Inventory, i, Some(st("dirt", 64)));
     }
     f.set(BOB, Kind::Inventory, 0, Some(st("diamond", 1)));
-    m.perform(&f, ADMIN, "Admin", "invsee Bob");
+    m.perform(&mut f, ADMIN, "Admin", "invsee Bob");
     m.tick(&mut f);
     let w = f.menu(ADMIN).0;
     m.clicked(&mut f, ADMIN, w, 0, 0, 0);
@@ -511,15 +538,38 @@ fn a_full_inventory_moves_nothing_and_says_so() {
 }
 
 #[test]
+fn exemption_nodes_have_the_original_names() {
+    assert_eq!(node(Kind::Inventory, "bypass-exempt"), "invseeplusplus.bypass-exempt.invsee");
+    assert_eq!(node(Kind::Ender, "bypass-exempt"), "invseeplusplus.bypass-exempt.endersee");
+    assert_eq!(node(Kind::Ender, "exempt"), "invseeplusplus.exempt.endersee");
+    assert_eq!(node(Kind::Inventory, "view"), "invseeplusplus.invsee.view");
+}
+
+#[test]
+fn a_permission_exempts_the_target_and_another_lets_the_viewer_through() {
+    let (mut m, mut f) = setup();
+    f.perms.insert((BOB, "invseeplusplus.exempt.invsee".into()), true);
+    m.perform(&mut f, HELPER, "Helper", "invsee Bob");
+    m.tick(&mut f);
+    assert!(!f.menus.contains_key(&HELPER));
+    assert!(f.told(HELPER)[0].contains("is exempted from being spectated."));
+    f.perms.insert((HELPER, "invseeplusplus.bypass-exempt.invsee".into()), true);
+    m.perform(&mut f, HELPER, "Helper", "invsee Bob");
+    m.tick(&mut f);
+    assert!(f.menus.contains_key(&HELPER));
+}
+
+#[test]
 fn commands_usages_console_and_completion() {
     let (mut m, mut f) = setup();
-    assert_eq!(m.perform(&f, ADMIN, "Admin", "gamemode creative"), None);
-    let r = m.perform(&f, ADMIN, "Admin", "invsee").unwrap();
+    assert_eq!(m.perform(&mut f, ADMIN, "Admin", "gamemode creative"), None);
+    let r = m.perform(&mut f, ADMIN, "Admin", "invsee").unwrap();
     assert_eq!(r, vec!["/invsee <username>|<uuid>".to_string()]);
     // Only the first argument counts; the rest is ignored, as InvSee++ does.
-    assert_eq!(m.perform(&f, ADMIN, "Admin", "invsee a b"), Some(vec![]));
-    let r = m.perform(&f, ADMIN, "Admin", "invsee no-such!name").unwrap();
-    assert!(r[0].contains("does not exist"), "{r:?}");
+    assert_eq!(m.perform(&mut f, ADMIN, "Admin", "invsee a b"), Some(vec![]));
+    assert_eq!(m.perform(&mut f, ADMIN, "Admin", "invsee no-such!name"), Some(vec![]));
+    m.tick(&mut f);
+    assert!(f.told(ADMIN).iter().any(|l| l.contains("Player no-such!name does not exist.")), "{:?}", f.told);
     assert_eq!(m.console("invsee"), Some(vec!["/invsee <username>|<uuid>".into()]));
     assert_eq!(
         m.console("invsee Bob"),
@@ -532,25 +582,25 @@ fn commands_usages_console_and_completion() {
     m.logged_out(CAROL, "Carol");
     m.tick(&mut f);
     assert_eq!(
-        m.tab_complete(&f, ADMIN, "/invsee "),
+        m.tab_complete(&mut f, ADMIN, "/invsee "),
         Some((8, vec!["Admin".into(), "Bob".into(), "Carol".into(), "Helper".into()]))
     );
-    assert_eq!(m.tab_complete(&f, ADMIN, "esee c"), Some((5, vec!["Carol".into()])));
-    assert_eq!(m.tab_complete(&f, BOB, "invsee "), None, "below the view level");
-    assert_eq!(m.tab_complete(&f, ADMIN, "tp "), None);
+    assert_eq!(m.tab_complete(&mut f, ADMIN, "esee c"), Some((5, vec!["Carol".into()])));
+    assert_eq!(m.tab_complete(&mut f, BOB, "invsee "), None, "below the view level");
+    assert_eq!(m.tab_complete(&mut f, ADMIN, "tp "), None);
 }
 
 #[test]
 fn reload_reads_the_file_again() {
-    let (mut m, f) = setup();
+    let (mut m, mut f) = setup();
     let path = f.dir.join("invsee-server.toml");
     std::fs::write(&path, config::DEFAULT).unwrap();
     m.load_config(config::DEFAULT, Some(path.clone()));
     std::fs::write(&path, "[titles]\ninventory = \"Inv of <player>\"\n").unwrap();
-    let r = m.perform(&f, ADMIN, "Admin", "invseeplusplusreload").unwrap();
+    let r = m.perform(&mut f, ADMIN, "Admin", "invseeplusplusreload").unwrap();
     assert_eq!(r[0], "§aInvSee++ configuration was reloaded.", "{r:?}");
     assert_eq!(m.config().titles.inventory, "Inv of <player>");
-    let r = m.perform(&f, BOB, "Bob", "isppreload").unwrap();
+    let r = m.perform(&mut f, BOB, "Bob", "isppreload").unwrap();
     assert!(r[0].contains("do not have permission"));
     std::fs::write(&path, "[titles]\nnope = 1\n").unwrap();
     let r = m.console("isppreload").unwrap();
@@ -592,7 +642,7 @@ fn an_editor_gets_the_games_live_inventory_menu_and_a_viewer_the_copy() {
     m.load_config("[access]\ninvsee_view = 1\ninvsee_edit = 3\n", None);
     f.live = true;
     f.set(BOB, Kind::Inventory, 0, Some(st("diamond_sword", 1)));
-    assert_eq!(m.perform(&f, ADMIN, "Admin", "invsee bob"), Some(vec![]));
+    assert_eq!(m.perform(&mut f, ADMIN, "Admin", "invsee bob"), Some(vec![]));
     m.tick(&mut f);
     let (window, target, layout) = f.live_menus.get(&ADMIN).cloned().expect("live menu");
     assert_eq!(target, (BOB, Kind::Inventory));
@@ -604,7 +654,7 @@ fn an_editor_gets_the_games_live_inventory_menu_and_a_viewer_the_copy() {
     m.clicked(&mut f, ADMIN, window, 0, 0, 0);
     assert_eq!(f.get(BOB, Kind::Inventory, 0), Some(st("diamond_sword", 1)));
     // A viewer below the edit level still gets the mod's read-only copy.
-    m.perform(&f, HELPER, "Helper", "invsee bob");
+    m.perform(&mut f, HELPER, "Helper", "invsee bob");
     m.tick(&mut f);
     assert!(!f.live_menus.contains_key(&HELPER));
     assert!(f.menus.contains_key(&HELPER));
@@ -614,7 +664,7 @@ fn an_editor_gets_the_games_live_inventory_menu_and_a_viewer_the_copy() {
 fn a_right_click_takes_the_larger_half() {
     let (mut m, mut f) = setup();
     f.set(BOB, Kind::Inventory, 3, Some(st("diamond", 5)));
-    m.perform(&f, ADMIN, "Admin", "invsee Bob");
+    m.perform(&mut f, ADMIN, "Admin", "invsee Bob");
     m.tick(&mut f);
     let window = f.menu(ADMIN).0;
     m.clicked(&mut f, ADMIN, window, 3, 1, 0);
@@ -629,7 +679,7 @@ fn a_right_click_with_no_free_slot_changes_nothing() {
     for i in 0..36 {
         f.set(ADMIN, Kind::Inventory, i, Some(st("dirt", 1)));
     }
-    m.perform(&f, ADMIN, "Admin", "invsee Bob");
+    m.perform(&mut f, ADMIN, "Admin", "invsee Bob");
     m.tick(&mut f);
     let window = f.menu(ADMIN).0;
     m.clicked(&mut f, ADMIN, window, 3, 1, 0);
@@ -643,7 +693,7 @@ fn armour_goes_to_its_slot_and_a_worn_piece_swaps() {
     f.set(ADMIN, Kind::Inventory, 0, Some(st("iron_helmet", 1)));
     f.set(ADMIN, Kind::Inventory, 1, Some(st("shield", 1)));
     f.set(BOB, Kind::Inventory, 39, Some(st("leather_helmet", 1)));
-    m.perform(&f, ADMIN, "Admin", "invsee Bob");
+    m.perform(&mut f, ADMIN, "Admin", "invsee Bob");
     m.tick(&mut f);
     let window = f.menu(ADMIN).0;
     m.clicked(&mut f, ADMIN, window, below(0), 0, 0);
@@ -660,11 +710,11 @@ fn permission_nodes_decide_before_the_operator_level() {
     // Bob is no operator but a permissions mod gives him the node; Admin is refused his.
     f.perms.insert((BOB, "invseeplusplus.invsee.view".into()), true);
     f.perms.insert((ADMIN, "invseeplusplus.endersee.view".into()), false);
-    assert_eq!(m.perform(&f, BOB, "Bob", "invsee Admin"), Some(vec![]));
-    let r = m.perform(&f, ADMIN, "Admin", "endersee Bob").unwrap();
+    assert_eq!(m.perform(&mut f, BOB, "Bob", "invsee Admin"), Some(vec![]));
+    let r = m.perform(&mut f, ADMIN, "Admin", "endersee Bob").unwrap();
     assert!(r[0].contains("do not have permission"), "{r:?}");
     f.perms.insert((BOB, "invseeplusplus.tabcomplete".into()), false);
-    assert_eq!(m.tab_complete(&f, BOB, "invsee "), None);
+    assert_eq!(m.tab_complete(&mut f, BOB, "invsee "), None);
 }
 
 #[test]
@@ -673,7 +723,7 @@ fn names_come_from_the_servers_profile_cache() {
     f.profiles.push((77, "Erin".into()));
     f.known.insert(77);
     f.invs.insert((77, Kind::Inventory), vec![None; 41]);
-    m.perform(&f, ADMIN, "Admin", "invsee erin");
+    m.perform(&mut f, ADMIN, "Admin", "invsee erin");
     m.tick(&mut f);
     assert_eq!(f.menu(ADMIN).2, "Erin's inventory");
 }
@@ -689,4 +739,122 @@ fn a_reload_that_changes_the_levels_resends_the_command_trees() {
     assert_eq!(f.refreshed, 1);
     m.tick(&mut f);
     assert_eq!(f.refreshed, 1, "once");
+}
+
+fn board(own: Vec<Option<St>>, locked: Vec<bool>, cursor: Option<St>) -> click::Board<St> {
+    click::Board { own, locked, inv: vec![None; 36], cursor }
+}
+
+#[test]
+fn a_left_click_picks_up_and_puts_down() {
+    let f = Fake::new();
+    let mut b = board(vec![Some(st("diamond", 5)), None], vec![false; 2], None);
+    let mut d = None;
+    assert!(click::click(&f, &mut b, &mut d, 0, 0, 0));
+    assert_eq!(b.cursor, Some(st("diamond", 5)));
+    assert_eq!(b.own[0], None);
+    assert!(click::click(&f, &mut b, &mut d, 1, 1, 0), "a right click puts one");
+    assert_eq!(b.own[1], Some(st("diamond", 1)));
+    assert_eq!(b.cursor, Some(st("diamond", 4)));
+}
+
+#[test]
+fn a_right_click_takes_the_larger_half_and_locked_slots_do_nothing() {
+    let f = Fake::new();
+    let mut b = board(vec![Some(st("diamond", 5)), Some(st("stone", 2))], vec![false, true], None);
+    let mut d = None;
+    assert!(click::click(&f, &mut b, &mut d, 0, 1, 0));
+    assert_eq!(b.cursor, Some(st("diamond", 3)));
+    assert_eq!(b.own[0], Some(st("diamond", 2)));
+    assert!(!click::click(&f, &mut b, &mut d, 1, 0, 0), "a locked slot gives nothing");
+}
+
+#[test]
+fn a_different_stack_swaps_with_the_cursor() {
+    let f = Fake::new();
+    let mut b = board(vec![Some(st("stone", 2))], vec![false], Some(st("dirt", 7)));
+    let mut d = None;
+    assert!(click::click(&f, &mut b, &mut d, 0, 0, 0));
+    assert_eq!(b.own[0], Some(st("dirt", 7)));
+    assert_eq!(b.cursor, Some(st("stone", 2)));
+}
+
+#[test]
+fn shift_click_goes_to_the_other_side() {
+    let f = Fake::new();
+    let mut b = board(vec![Some(st("diamond", 5)); 1], vec![false], None);
+    let mut d = None;
+    // Own slot to the spectator's inventory: the hotbar's last slot first.
+    assert!(click::click(&f, &mut b, &mut d, 0, 0, 1));
+    assert_eq!(b.own[0], None);
+    assert_eq!(b.inv[8], Some(st("diamond", 5)));
+    // And back: the inventory slot (below the one own slot) to the first free own slot.
+    assert!(click::click(&f, &mut b, &mut d, 1 + 27 + 8, 0, 1));
+    assert_eq!(b.own[0], Some(st("diamond", 5)));
+    assert_eq!(b.inv[8], None);
+}
+
+#[test]
+fn a_number_key_swaps_with_the_hotbar() {
+    let f = Fake::new();
+    let mut b = board(vec![Some(st("diamond", 5))], vec![false], None);
+    b.inv[2] = Some(st("stone", 1));
+    let mut d = None;
+    assert!(click::click(&f, &mut b, &mut d, 0, 2, 2));
+    assert_eq!(b.own[0], Some(st("stone", 1)));
+    assert_eq!(b.inv[2], Some(st("diamond", 5)));
+}
+
+#[test]
+fn a_drag_spreads_the_cursor_evenly() {
+    let f = Fake::new();
+    let mut b = board(vec![None, None, None], vec![false; 3], Some(st("stone", 10)));
+    let mut d = None;
+    assert!(!click::click(&f, &mut b, &mut d, -999, 0, 5));
+    for slot in 0..3 {
+        assert!(!click::click(&f, &mut b, &mut d, slot, 1, 5));
+    }
+    assert!(click::click(&f, &mut b, &mut d, -999, 2, 5));
+    assert_eq!(b.own, vec![Some(st("stone", 3)); 3]);
+    assert_eq!(b.cursor, Some(st("stone", 1)));
+}
+
+#[test]
+fn a_double_click_gathers_matching_stacks() {
+    let f = Fake::new();
+    let mut b = board(vec![Some(st("stone", 10)), Some(st("dirt", 4)), Some(st("stone", 60))], vec![false; 3], Some(st("stone", 1)));
+    let mut d = None;
+    assert!(click::click(&f, &mut b, &mut d, 0, 0, 6));
+    assert_eq!(b.cursor, Some(st("stone", 64)));
+    assert_eq!(b.own[0], None);
+    assert_eq!(b.own[2], Some(st("stone", 7)));
+}
+
+#[test]
+fn a_live_click_writes_the_target_the_spectator_and_the_cursor() {
+    let (mut m, mut f) = setup();
+    f.cursor_mode = true;
+    f.set(BOB, Kind::Inventory, 3, Some(st("diamond", 5)));
+    m.perform(&mut f, ADMIN, "Admin", "invsee Bob");
+    m.tick(&mut f);
+    let w = f.menu(ADMIN).0;
+    m.clicked(&mut f, ADMIN, w, 3, 0, 0);
+    assert_eq!(f.get(BOB, Kind::Inventory, 3), None);
+    assert_eq!(f.cursors[&ADMIN], Some(st("diamond", 5)));
+    assert_eq!(f.menu(ADMIN).3[3], None);
+    // Put them in the spectator's own slot below the view.
+    m.clicked(&mut f, ADMIN, w, below(10), 0, 0);
+    assert_eq!(f.get(ADMIN, Kind::Inventory, 10), Some(st("diamond", 5)));
+    assert_eq!(f.cursors[&ADMIN], None);
+}
+
+#[test]
+fn a_view_shows_the_placeholder_of_the_targets_container() {
+    let (mut m, mut f) = setup();
+    f.open.insert(BOB, "minecraft:anvil".into());
+    m.perform(&mut f, ADMIN, "Admin", "invsee Bob");
+    m.tick(&mut f);
+    let items = f.menu(ADMIN).3.clone();
+    assert_eq!(items[45].as_ref().unwrap().name.as_deref(), Some("§bAnvil input"));
+    assert_eq!(items[47].as_ref().unwrap().name.as_deref(), Some("§4"), "past the anvil's two slots");
 }

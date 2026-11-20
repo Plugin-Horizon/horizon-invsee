@@ -3,7 +3,7 @@
 use serde::Deserialize;
 
 /// The default file, as written next to the server when missing.
-pub const DEFAULT: &str = include_str!("../invsee-server.toml");
+pub const DEFAULT: &str = include_str!("../../data/invsee/invsee-server.toml");
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
@@ -32,10 +32,35 @@ pub struct Access {
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Resolver {
+    /// A player who is on (`online player`).
+    #[serde(rename = "online", alias = "online player")]
     Online,
+    /// Players seen since the start (`logged out players cache`).
+    #[serde(rename = "logged_out", alias = "logged out players cache")]
     LoggedOut,
+    /// The server's user cache (`usercache.json`).
+    #[serde(rename = "usercache")]
     Usercache,
+    /// Paper's offline player cache (`paper offline player cache`): the server's user cache here.
+    #[serde(rename = "paper_offline_player_cache", alias = "paper offline player cache")]
+    PaperCache,
+    /// The permission plugin's own records (`permission plugin`).
+    #[serde(rename = "permission_plugin", alias = "permission plugin")]
+    PermissionPlugin,
+    /// The proxy's (`proxy`).
+    #[serde(rename = "proxy")]
+    Proxy,
+    /// Mojang's API (`mojang rest api call`).
+    #[serde(rename = "mojang", alias = "mojang rest api call")]
     Mojang,
+    /// The Electroid mirror of Mojang's API (`electroid mojang api call`).
+    #[serde(rename = "electroid", alias = "electroid mojang api call")]
+    Electroid,
+    /// The players' save files (`player data save files`).
+    #[serde(rename = "player_data", alias = "player data save files")]
+    PlayerData,
+    /// The offline-mode UUID of a name (`spoof`).
+    #[serde(rename = "offline", alias = "spoof")]
     Offline,
 }
 
@@ -153,8 +178,9 @@ impl Default for Players {
             offline: true,
             unknown: true,
             tabcomplete_offline: true,
-            uuid_resolve: vec![Online, LoggedOut, Usercache, Mojang],
-            name_resolve: vec![Online, LoggedOut, Usercache, Mojang],
+            // InvSee++'s shipped order (its commented-out defaults in config.yml).
+            uuid_resolve: vec![Online, LoggedOut, PaperCache, PermissionPlugin, Proxy, Mojang, PlayerData],
+            name_resolve: vec![Online, LoggedOut, PermissionPlugin, Mojang, PlayerData],
             mojang_timeout_ms: 5000,
             offline_refresh_ticks: 20,
         }
@@ -173,8 +199,8 @@ impl Default for Titles {
 impl Default for Templates {
     fn default() -> Self {
         Templates {
-            inventory: crate::template::DEFAULT_INVENTORY.into(),
-            enderchest: crate::template::DEFAULT_ENDERCHEST.into(),
+            inventory: crate::horizon_invsee::template::DEFAULT_INVENTORY.into(),
+            enderchest: crate::horizon_invsee::template::DEFAULT_ENDERCHEST.into(),
         }
     }
 }
@@ -258,7 +284,8 @@ mod tests {
         assert_eq!(c.access.invsee_edit, 3, "edit implies view");
         assert_eq!(c.access.reload, 4);
         assert_eq!(c.access.endersee_view, 1);
-        assert_eq!(c.players.uuid_resolve.len(), 4);
+        assert_eq!(c.players.uuid_resolve.len(), 7);
+        assert_eq!(c.players.name_resolve.len(), 5);
     }
 
     #[test]

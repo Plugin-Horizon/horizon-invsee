@@ -4,8 +4,32 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-/// A UUID as typed: with or without dashes, any case.
+/// A UUID as Java's `UUID.fromString` reads it, which is what InvSee++ asks about a typed word: five
+/// dash-separated hex groups (short ones too, as the JDK masks them), 36 characters at most. Undashed
+/// hex is not a UUID to it, so the word is a name.
 pub fn parse_uuid(s: &str) -> Option<u128> {
+    if s.len() > 36 {
+        return None;
+    }
+    let parts: Vec<&str> = s.split('-').collect();
+    if parts.len() != 5 || parts.iter().any(|p| p.is_empty() || p.len() > 16) {
+        return None;
+    }
+    let mut v = [0u64; 5];
+    for (slot, p) in v.iter_mut().zip(&parts) {
+        if !p.chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+        *slot = u64::from_str_radix(p, 16).ok()?;
+    }
+    // The JDK keeps the low bits of each group: 32, 16, 16 | 16, 48.
+    let most = ((v[0] & 0xffff_ffff) << 32) | ((v[1] & 0xffff) << 16) | (v[2] & 0xffff);
+    let least = ((v[3] & 0xffff) << 48) | (v[4] & 0xffff_ffff_ffff);
+    Some((u128::from(most) << 64) | u128::from(least))
+}
+
+/// A UUID as the mod's own files and Mojang's answers write it: with or without dashes, any case.
+pub fn parse_uuid_lenient(s: &str) -> Option<u128> {
     let hex: String = s.chars().filter(|c| *c != '-').collect();
     if hex.len() != 32 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
         return None;
@@ -37,6 +61,12 @@ pub fn format_uuid(u: u128) -> String {
 /// can be shorter, so 1 to 16 is accepted.
 pub fn valid_name(s: &str) -> bool {
     (1..=16).contains(&s.len()) && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// A name as the server's own files can hold it: Floodgate's Bedrock names start with a dot and may differ
+/// from Java's rule, so only length and whitespace are checked.
+pub fn plausible_name(s: &str) -> bool {
+    !s.is_empty() && s.chars().count() <= 16 && !s.chars().any(|c| c.is_whitespace() || c.is_control())
 }
 
 /// The UUID an offline-mode server gives `name`: version 3 (MD5) of `OfflinePlayer:<name>`,
@@ -143,11 +173,11 @@ pub fn parse_usercache(text: &str) -> Directory {
     for item in items.iter().rev() {
         let (Some(name), Some(uuid)) = (
             item.get("name").and_then(|v| v.as_str()),
-            item.get("uuid").and_then(|v| v.as_str()).and_then(parse_uuid),
+            item.get("uuid").and_then(|v| v.as_str()).and_then(parse_uuid_lenient),
         ) else {
             continue;
         };
-        if valid_name(name) {
+        if plausible_name(name) {
             d.add(uuid, name);
         }
     }
@@ -209,12 +239,27 @@ mod tests {
     #[test]
     fn uuids_parse_with_or_without_dashes() {
         let u = 0x0123456789abcdef0123456789abcdefu128;
-        assert_eq!(parse_uuid("0123456789abcdef0123456789abcdef"), Some(u));
-        assert_eq!(parse_uuid("01234567-89AB-cdef-0123-456789abcdef"), Some(u));
+        assert_eq!(parse_uuid_lenient("0123456789abcdef0123456789abcdef"), Some(u));
+        assert_eq!(parse_uuid_lenient("01234567-89AB-cdef-0123-456789abcdef"), Some(u));
         assert_eq!(format_uuid(u), "01234567-89ab-cdef-0123-456789abcdef");
-        assert_eq!(parse_uuid("0123-456789abcdef0123456789abcdef"), None);
+        assert_eq!(parse_uuid_lenient("0123456789abcdef0123456789abcdef"), Some(u));
+        assert_eq!(parse_uuid_lenient("0123-456789abcdef0123456789abcdef"), None);
+        assert_eq!(parse_uuid_lenient("Steve"), None);
+        assert_eq!(parse_uuid_lenient("0123456789abcdef0123456789abcdeg"), None);
+    }
+
+    #[test]
+    fn the_command_reads_uuids_as_java_does() {
+        // Undashed hex is a name to InvSee++ (UUID.fromString refuses it).
+        assert_eq!(parse_uuid("0123456789abcdef0123456789abcdef"), None);
+        // Short dashed groups are accepted and masked as the JDK masks them.
+        assert_eq!(parse_uuid("1-1-1-1-1"), Some((1u128 << 96) | (1u128 << 80) | (1u128 << 64) | (1u128 << 48) | 1));
+        assert_eq!(parse_uuid("01234567-89AB-cdef-0123-456789abcdef"), Some(0x0123456789abcdef0123456789abcdefu128));
+        assert_eq!(parse_uuid("0-0-0-0-0-0"), None, "six groups");
+        assert_eq!(parse_uuid("0--0-0-0"), None, "an empty group");
+        assert_eq!(parse_uuid("0-0-0-0-zz"), None);
         assert_eq!(parse_uuid("Steve"), None);
-        assert_eq!(parse_uuid("0123456789abcdef0123456789abcdeg"), None);
+        assert_eq!(parse_uuid("Bob-Smith-Jr-Ab-Cd"), None);
     }
 
     #[test]
@@ -231,6 +276,16 @@ mod tests {
         assert_eq!(d.uuid("alice_1"), Some((1, "Alice_1".into())));
         assert_eq!(d.name(2).as_deref(), Some("Bob"));
         assert!(parse_usercache("not json").is_empty());
+    }
+
+    #[test]
+    fn bedrock_names_with_a_dot_are_kept() {
+        let text = r#"[{"name":".Steve_B","uuid":"00000000-0000-0000-0000-000000000005","expiresOn":"x"}]"#;
+        let d = parse_usercache(text);
+        assert_eq!(d.uuid(".steve_b"), Some((5, ".Steve_B".into())));
+        assert!(!valid_name(".Steve_B"), "Mojang is still not asked about it");
+        assert!(plausible_name(".Steve_B"));
+        assert!(!plausible_name("two words"));
     }
 
     #[test]

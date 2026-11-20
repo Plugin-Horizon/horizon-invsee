@@ -1,5 +1,9 @@
 # invsee for Horizon
 
+## Port status
+
+Compared with InvSee++ (master, 722def9) (estimate): **82 %** of the original's commands, permissions, config keys, messages and features work today; **89 %** once our open Horizon PRs are merged; **91 %** with the engine changes we are writing; **82 %** with the newest Horizon SDK. Estimated count: 37/45 items. Status: not yet compiled after the 2026-11-20 round.
+
 > **Unofficial Rust port of InvSee++ for the Horizon server (https://github.com/arismoko/horizon). Not affiliated with or endorsed by the InvSee++ authors.**
 
 A native mod for [Horizon](https://github.com/arismoko/horizon) servers: operators open another player's
@@ -37,7 +41,7 @@ inventory; a right click takes the larger half into a free slot of yours; clicki
 the view moves it whole into the target's, and armour, elytra, shields and totems go to the slot they are worn in
 (a piece already worn swaps places with it). A number key over an
 empty slot of the view gives your hotbar slot. Middle click, Q, dragging and double clicks do nothing. Every move is
-one checked step in Horizon (`native_move_stack`): nothing is duplicated or lost, and a move that no longer fits or
+two checked writes (source emptied, then the target filled; the source is put back if the second fails and the slot is still free, otherwise the message says so), and a move that no longer fits or
 whose stack changed does nothing and says why.
 
 ## Configuration
@@ -54,10 +58,12 @@ it changes (see [`core/invsee-server.toml`](core/invsee-server.toml)):
   (`<world>/invsee/InvSee++ logs/_global.log`), `SPECTATOR_LOG_FILE` (`<world>/invsee/InvSee++ logs/<uuid>.log`), `SERVER_LOG_FILE`,
   `CONSOLE`, and the formats with `<date> <time> <level> <spectator_uuid> <spectator_name> <taken> <given> <target>`.
 
-Permission nodes (`invseeplusplus.invsee.view|edit|bypass-exempt`, the same for `endersee`, `invseeplusplus.reload`,
-`invseeplusplus.tabcomplete`) are asked through Horizon's permission check, so a permissions mod can answer them; where
-none does, the operator levels of `[access]` apply. Changing those levels in the file resends every player's command
-tree.
+Permission nodes (`invseeplusplus.invsee.view|edit`, `invseeplusplus.endersee.view|edit`, `invseeplusplus.reload`,
+`invseeplusplus.tabcomplete`, `invseeplusplus.bypass-exempt.invsee|endersee`, `invseeplusplus.exempt.invsee|endersee`)
+are asked through Horizon's permission check, so a permissions mod can answer them. The default of the first six is
+the operator level of `[access]` as read at server start (a restart applies a changed level); the exempt and
+bypass-exempt nodes are declared at level 4 (InvSee++'s default is nobody, which a node default cannot say). A target
+is exempt when it is in the config list or holds `invseeplusplus.exempt.<kind>` (online targets only).
 
 ## Differences from InvSee++
 
@@ -82,9 +88,17 @@ horizon-launcher native-build <path to this folder> --server-output <dir> --vers
 
 What does not work yet on arismoko/horizon (each is marked `TODO(arismoko-api: ...)` in `src/lib.rs`):
 
-- Offline players' inventories cannot be read (a mod cannot read the player file yet).
-- The view is a snapshot taken when it opens; there is no live menu over the target's slots yet.
-- Log lines go to stderr, not to the server's log file.
+- Offline players' inventories cannot be read or written (a mod cannot read the player file yet).
+- The view follows the target every tick and clicks use vanilla's rules (cursor, drag, shift click, number keys,
+  double click), but it is the mod's own menu, not the target's container: throws and middle clicks do nothing, and
+  the target's cursor and crafting grid are shown, not edited.
+- The target's anvil, merchant and other workstation inputs cannot be read (only their placeholders are shown).
+- The `permission plugin` and `proxy` resolve strategies answer nothing. `player data` answers from `usercache.json`
+  (the last known names of players who were on), not from the save files.
+- Log lines (the server log and console outputs, and the reasons of failed reads) go to stderr, not to the server's log file.
+- The `invseeplusplus.*` wildcard cannot be checked (typed nodes have no wildcard name); a permission mod answering it is not seen.
+- A never-played player's view refuses clicks with its own text (`... nothing can be stored yet`): InvSee++ stores
+  there, which needs the offline write API.
 
 ## Licence
 

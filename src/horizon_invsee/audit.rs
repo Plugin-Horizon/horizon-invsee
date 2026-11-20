@@ -1,5 +1,5 @@
 //! What spectators changed, written where `[logging] output` says.
-use crate::config::{Logging, Output};
+use crate::horizon_invsee::config::{Logging, Output};
 use std::io::Write;
 use std::path::Path;
 
@@ -40,7 +40,7 @@ pub fn fill(format: &str, e: &Entry<'_>, now: chrono::DateTime<chrono::Local>) -
         .replace("<date>", &now.format("%Y-%m-%d").to_string())
         .replace("<time>", &now.format("%H:%M:%S").to_string())
         .replace("<level>", "INFO")
-        .replace("<spectator_uuid>", &crate::names::format_uuid(e.spectator))
+        .replace("<spectator_uuid>", &crate::horizon_invsee::names::format_uuid(e.spectator))
         .replace("<spectator_name>", e.spectator_name)
         .replace("<taken>", &items(e.taken))
         .replace("<given>", &items(e.given))
@@ -75,7 +75,7 @@ pub fn write(cfg: &Logging, dir: &Path, e: &Entry<'_>) -> Vec<String> {
             }
             Output::SpectatorLogFile => {
                 let text = fill(&cfg.format_spectator_log_file, e, now);
-                let file = dir.join(format!("{}.log", crate::names::format_uuid(e.spectator)));
+                let file = dir.join(format!("{}.log", crate::horizon_invsee::names::format_uuid(e.spectator)));
                 if let Err(err) = append(&file, &text) {
                     console.push(format!("invsee: can't write its log: {err}"));
                 }
