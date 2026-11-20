@@ -178,8 +178,9 @@ impl Default for Players {
             offline: true,
             unknown: true,
             tabcomplete_offline: true,
-            uuid_resolve: vec![Online, LoggedOut, Usercache, Mojang],
-            name_resolve: vec![Online, LoggedOut, Usercache, Mojang],
+            // InvSee++'s shipped order (its commented-out defaults in config.yml).
+            uuid_resolve: vec![Online, LoggedOut, PaperCache, PermissionPlugin, Proxy, Mojang, PlayerData],
+            name_resolve: vec![Online, LoggedOut, PermissionPlugin, Mojang, PlayerData],
             mojang_timeout_ms: 5000,
             offline_refresh_ticks: 20,
         }
@@ -283,7 +284,8 @@ mod tests {
         assert_eq!(c.access.invsee_edit, 3, "edit implies view");
         assert_eq!(c.access.reload, 4);
         assert_eq!(c.access.endersee_view, 1);
-        assert_eq!(c.players.uuid_resolve.len(), 4);
+        assert_eq!(c.players.uuid_resolve.len(), 7);
+        assert_eq!(c.players.name_resolve.len(), 5);
     }
 
     #[test]

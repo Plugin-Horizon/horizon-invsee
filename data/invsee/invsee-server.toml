@@ -37,10 +37,10 @@ tabcomplete_offline = true
 #   electroid                   the Electroid mirror of that API
 #   player_data                 the players' save files (the game offers no lookup yet: answers nothing)
 #   offline                     the offline-mode UUID of the name (UUID v3 of "OfflinePlayer:<name>")
-uuid_resolve = ["online", "logged_out", "usercache", "mojang"]
+uuid_resolve = ["online", "logged_out", "paper_offline_player_cache", "permission_plugin", "proxy", "mojang", "player_data"]
 # How a typed UUID gets a name for the title: online, logged_out, usercache, paper_offline_player_cache,
 # permission_plugin, mojang, electroid, player_data.
-name_resolve = ["online", "logged_out", "usercache", "mojang"]
+name_resolve = ["online", "logged_out", "permission_plugin", "mojang", "player_data"]
 # How long a Mojang request may take, in milliseconds.
 mojang_timeout_ms = 5000
 # How often an open view of an offline player is read again from the file, in ticks.
