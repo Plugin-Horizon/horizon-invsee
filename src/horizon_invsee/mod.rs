@@ -901,7 +901,12 @@ impl<S: Clone + PartialEq> InvSee<S> {
                 (Query::Uuid(_), Resolver::Offline) => None,
                 // The permission plugin's and the save files' own records, when the game can read them.
                 (q, Resolver::PermissionPlugin) => host.permission_lookup(q),
-                (q, Resolver::PlayerData) => host.save_file_lookup(q),
+                // The save files' last known names and the mod's usercache.json answer the same question
+                // for a player who was on: the usercache is the stand-in while no save-file API exists.
+                (q, Resolver::PlayerData) => host.save_file_lookup(q).or_else(|| match q {
+                    Query::Name(n) => self.usercache().and_then(|d| d.uuid(n)),
+                    Query::Uuid(u) => self.usercache().and_then(|d| d.name(*u)).map(|n| (*u, n)),
+                }),
                 // The proxy answers a UUID lookup over the plugin channel; the game has no way to ask it yet.
                 (_, Resolver::Proxy) => None,
             };
@@ -952,6 +957,10 @@ impl<S: Clone + PartialEq> InvSee<S> {
             host.tell(p.viewer, &format!("§cPlayer {} is exempted from being spectated.", p.typed));
             return;
         }
+        let what = match p.kind {
+            Kind::Inventory => "inventory",
+            Kind::Ender => "enderchest",
+        };
         let (slots, unknown) = match host.inventory(target, p.kind) {
             Ok(inv) => (inv.slots, false),
             Err(InvError::NeverPlayed) if self.cfg.players.unknown => {
@@ -961,12 +970,16 @@ impl<S: Clone + PartialEq> InvSee<S> {
                 host.tell(p.viewer, &format!("§cPlayer {} has not logged onto the server yet.", p.typed));
                 return;
             }
+            // InvSee++'s wording for each failure; the reason goes to the server's stderr, where its
+            // SEVERE log line would have been.
             Err(InvError::Busy(why)) => {
-                host.tell(p.viewer, &format!("§cCan't open {}'s inventory now: {why}.", p.typed));
+                eprintln!("[invsee] could not open an inventory now: {why}");
+                host.tell(p.viewer, &format!("§cCould not open {}'s {what} for an unknown reason.", p.typed));
                 return;
             }
             Err(InvError::Other(why)) => {
-                host.tell(p.viewer, &format!("§cCan't open {}'s inventory: {why}.", p.typed));
+                eprintln!("[invsee] could not read an inventory: {why}");
+                host.tell(p.viewer, &format!("§cAn internal fault occurred when trying to load {}'s {what}.", p.typed));
                 return;
             }
         };
