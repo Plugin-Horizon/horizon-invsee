@@ -2,7 +2,7 @@
 
 ## Port status
 
-Compared with InvSee++ (master, 722def9) (estimate): **82 %** of the original's commands, permissions, config keys, messages and features work today; **89 %** once our open Horizon PRs are merged; **91 %** with the engine changes we are writing; **82 %** with the newest Horizon SDK. Estimated count: 37/45 items. Status: not yet compiled after the 2026-11-20 round.
+Compared with InvSee++ (master, 722def9): **22/29 items (76 %)** of the item list in `audit/rec100/invsee.md` work on the pinned SDK; the 7 open items need engine APIs (offline inventories and `console_log` exist in engine main after the pin; a live shared menu and a "nobody" permission default exist nowhere yet). Status: see test run of 2026-11-24.
 
 > **Unofficial Rust port of InvSee++ for the Horizon server (https://github.com/arismoko/horizon). Not affiliated with or endorsed by the InvSee++ authors.**
 

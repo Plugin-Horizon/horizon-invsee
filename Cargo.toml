@@ -15,3 +15,7 @@ toml = "1.1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 ureq = { version = "2", default-features = false, features = ["tls"] }
 
+
+[features]
+# Uses engine APIs newer than the SDK pin (console_log); off by default.
+next-engine = []

@@ -199,7 +199,9 @@ impl inv::Host for GameHost<'_> {
 
     fn inventory(&self, uuid: u128, k: Kind) -> Result<inv::Inv<ItemStack>, inv::InvError> {
         let Some(player) = self.host.player(uuid) else {
-            // TODO(arismoko-api: player_offline_inventory): a player's file cannot be read from a mod.
+            // HMOD-GAP(server_player_inventory): engine main (7cb3ef30c3, after the pin) has `server_player_inventory`
+            // and `server_move_inventory_stack` for saved players, but both take `&mut host` while the core's
+            // `Host::inventory` is `&self`; wiring needs a core signature change plus the SDK pin to move.
             return Err(inv::InvError::Other(
                 "offline inventories cannot be read on this server yet".into(),
             ));
@@ -413,7 +415,12 @@ impl inv::Host for GameHost<'_> {
     }
 
     fn log(&mut self, line: &str) {
-        // TODO(arismoko-api: server_log): stderr only, not the server's log file.
+        // TODO(arismoko-api: server_log): stderr only unless built with `next-engine` (`console_log`, engine main after the pin).
+        #[cfg(feature = "next-engine")]
+        for l in line.lines() {
+            let _ = self.host.messages().console_log(ID, mod_api::ConsoleLevel::Info, l);
+        }
+        #[cfg(not(feature = "next-engine"))]
         eprint_line(line);
     }
 
