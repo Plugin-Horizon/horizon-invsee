@@ -2,7 +2,7 @@
 
 ## Port status
 
-Compared with InvSee++ (master, 722def9): **22/29 items (76 %)** of the item list in `audit/rec100/invsee.md` work on the pinned SDK; the 7 open items need engine APIs (offline inventories and `console_log` exist in engine main after the pin; a live shared menu and a "nobody" permission default exist nowhere yet). Status: see test run of 2026-11-24.
+Compared with InvSee++ (master, 722def9): **32/37 items** of the item list in `audit/rec100/invsee.md` work (round 6); the 5 open items are engine-side. The Give, Clear and Clone addons (`/invgive`, `/endergive`, `/invclear`, `/enderclear`, `/invclone`, `/enderclone`) are part of the mod; the spectator inventory events are service callbacks: call the service `invsee:api` with `subscribe <your mod id>`, and your `<id>:invsee_event` service gets `spectator_inventory_save` / `spectator_inventory_offline_created` lines (reply `cancel` to the save event to stop it).
 
 > **Unofficial Rust port of InvSee++ for the Horizon server (https://github.com/arismoko/horizon). Not affiliated with or endorsed by the InvSee++ authors.**
 
@@ -31,6 +31,12 @@ This is a native trait mod: `horizon-mod.toml`, a `Cargo.toml` that depends on `
 | `/invsee <name>\|<uuid>` | `inventorysee`, `isee` | 1 (any operator) |
 | `/endersee <name>\|<uuid>` | `enderchestsee`, `esee` | 1 (any operator) |
 | `/invseeplusplusreload` | `isppreload` | 1 (any operator; also from the console) |
+| `/invgive <player> <item>[components] [amount]` | `inventorygive`, `igive` | 1 (`give_inventory`; also from the console) |
+| `/endergive <player> <item>[components] [amount]` | `enderchestgive`, `egive` | 1 (`give_enderchest`) |
+| `/invclear <player> [item or #tag] [max]` | `inventoryclear`, `iclear` | 1 (`clear_inventory`) |
+| `/enderclear <player> [item or #tag] [max]` | `enderchestclear`, `eclear` | 1 (`clear_enderchest`) |
+| `/invclone <source> [target]` | `inventoryclone`, `iclone` | 1 (`clone_inventory`) |
+| `/enderclone <source> [target]` | `enderchestclone`, `eclone` | 1 (`clone_enderchest`) |
 
 A view opens on the next server tick. It follows the target live (every tick while they are online, every
 `offline_refresh_ticks` from their file while they are not). A player who joins or leaves while viewed is switched

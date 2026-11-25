@@ -5,6 +5,7 @@
 //! read again when it changes).
 
 pub mod horizon_invsee;
+pub mod snbt;
 use crate::horizon_invsee::{self as inv, Kind};
 use mod_api::{
     Command, CommandArgumentValue, CommandInvocation, CommandSource, Compound, Config, ConfigKind,
@@ -13,6 +14,7 @@ use mod_api::{
     MenuClickedEvent, MenuClosedEvent, MenuReplace, PlayerViewKind, NodeDefault, PermissionGatherNodesEvent,
     PermissionLevel, PermissionNode, PermissionValueType, PlayerCommandEvent, PlayerLoggedInEvent,
     PlayerLoggedOutEvent, RegisterNodeCommandsEvent, RegisterConfigsEvent, RunModCommandEvent,
+    ModServiceCallEvent, ModServiceError, PayloadBytes,
     ServerHost, ServerStoppingEvent, ServerTickEvent, ServerTickPhase, Suggestion,
     TabCompleteEvent, Tag, Text, PlayerInventoryError, PlayerInventoryKind, PlayerInventoryMove,
 };
@@ -34,6 +36,11 @@ const OWN_WORDS: [&str; 8] = [
     "isppreload",
 ];
 
+/// Whether `word` is a command of the mod: the view and reload words, the addon commands.
+fn is_own(word: &str) -> bool {
+    OWN_WORDS.contains(&word) || inv::addons::addon_word(word).is_some()
+}
+
 /// InvSee++'s `++` reload aliases: the engine refuses them as command words, so they are never registered;
 /// `player_command` answers them (the client sends the typed line even for an unknown command).
 const PLUS_WORDS: [&str; 2] = ["invsee++reload", "is++reload"];
@@ -50,6 +57,9 @@ static OPEN: Mutex<BTreeMap<u128, String>> = Mutex::new(BTreeMap::new());
 static DEFERRED: Mutex<Vec<Deferred>> = Mutex::new(Vec::new());
 
 /// The window id of each viewer's open view (from `open_menu`), so `set_menu_items` can refresh it.
+/// The mods that called `invsee:api` `subscribe`: their `<id>:invsee_event` service gets the spectator inventory events.
+static SUBSCRIBERS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
 static WINDOWS: Mutex<BTreeMap<u128, i32>> = Mutex::new(BTreeMap::new());
 
 enum Deferred {
@@ -142,6 +152,9 @@ fn granting(node: &str) -> Vec<&str> {
         "invseeplusplus.bypass-exempt.invsee" | "invseeplusplus.bypass-exempt.endersee" => {
             vec![node, "invseeplusplus.bypass-exempt"]
         }
+        "invseeplusplus.give.inventory" | "invseeplusplus.give.enderchest" => vec![node, "invseeplusplus.give.*"],
+        "invseeplusplus.clear.inventory" | "invseeplusplus.clear.enderchest" => vec![node, "invseeplusplus.clear.*"],
+        "invseeplusplus.clone.inventory" | "invseeplusplus.clone.enderchest" => vec![node, "invseeplusplus.clone.*"],
         _ => vec![node],
     }
 }
@@ -631,6 +644,48 @@ impl inv::Host for GameHost<'_> {
         (stack.item().id(&*self.host), stack.count())
     }
 
+    fn item_ids(&self) -> Vec<String> {
+        self.host.item_ids().iter().map(|i| i.to_string()).collect()
+    }
+
+    /// Vanilla's item argument: the id, then `[component=value,!component]`.
+    fn make_stack(&self, item: &str, components: Option<&str>) -> Result<ItemStack, String> {
+        let unknown = || format!("Unknown item '{item}'");
+        let id = Identifier::parse(item).map_err(|_| unknown())?;
+        let key = self.host.item_key(&id).ok_or_else(unknown)?;
+        let mut stack = ItemStack::of(key);
+        if let Some(inner) = components {
+            let patch = snbt::parse_components(inner)?;
+            stack.apply_components(&patch).map_err(|e| format!("Invalid components: {e:?}"))?;
+        }
+        Ok(stack)
+    }
+
+    fn tag_items(&self, tag: &str) -> Vec<String> {
+        let Ok(id) = Identifier::parse(tag) else { return Vec::new() };
+        let tags = self.host.tags();
+        let Some(key) = tags.key(&id) else { return Vec::new() };
+        let Some(items) = tags.items(key) else { return Vec::new() };
+        items.into_iter().map(|k| self.host.item_key_id(k)).collect()
+    }
+
+    /// The spectator inventory events, as service calls to the mods that subscribed. A reply of `cancel` cancels the
+    /// save event.
+    fn event(&mut self, line: &str) -> bool {
+        let subscribers = SUBSCRIBERS.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let mut cancelled = false;
+        for id in subscribers {
+            match self.host.commands().call_mod_service(&format!("{id}:invsee_event"), line.as_bytes()) {
+                Ok(reply) => cancelled |= reply == b"cancel",
+                Err(ModServiceError::ProviderNotLoaded) => {
+                    SUBSCRIBERS.lock().unwrap_or_else(|e| e.into_inner()).retain(|s| *s != id);
+                }
+                Err(_) => {}
+            }
+        }
+        cancelled
+    }
+
     fn server_dir(&self) -> Option<PathBuf> {
         // The server runs in its own folder (where usercache.json lies), as stage.py starts it.
         std::env::current_dir().ok()
@@ -648,12 +703,16 @@ fn usages() -> Vec<(String, u8)> {
 
 /// The plugin.yml permission node of a command word (`invseeplusplus.invsee.view` for `invsee` and its
 /// aliases, `invseeplusplus.endersee.view`, `invseeplusplus.reload` for the reload words).
-fn node_of_word(word: &str) -> &'static str {
+fn node_of_word(word: &str) -> String {
+    if let Some((addon, kind)) = inv::addons::addon_word(word) {
+        return inv::addons::addon_node(addon, kind);
+    }
     match word {
         "endersee" | "enderchestsee" | "esee" => "invseeplusplus.endersee.view",
         "invseeplusplusreload" | "isppreload" | "invsee++reload" | "is++reload" => "invseeplusplus.reload",
         _ => "invseeplusplus.invsee.view",
     }
+    .to_owned()
 }
 
 /// The typed Boolean node of a plugin.yml permission name (`invseeplusplus.reload`).
@@ -718,6 +777,15 @@ fn permission_nodes() -> Vec<Declared> {
         node("invseeplusplus.endersee.edit", Some(access.endersee_edit as i32), &["invseeplusplus.endersee.view"]),
         node("invseeplusplus.tabcomplete", Some(access.invsee_view.min(access.endersee_view) as i32), &[]),
         node("invseeplusplus.reload", Some(access.reload as i32), &[]),
+        node("invseeplusplus.give.*", None, &["invseeplusplus.give.inventory", "invseeplusplus.give.enderchest"]),
+        node("invseeplusplus.give.inventory", Some(access.give_inventory as i32), &[]),
+        node("invseeplusplus.give.enderchest", Some(access.give_enderchest as i32), &[]),
+        node("invseeplusplus.clear.*", None, &["invseeplusplus.clear.inventory", "invseeplusplus.clear.enderchest"]),
+        node("invseeplusplus.clear.inventory", Some(access.clear_inventory as i32), &[]),
+        node("invseeplusplus.clear.enderchest", Some(access.clear_enderchest as i32), &[]),
+        node("invseeplusplus.clone.*", None, &["invseeplusplus.clone.inventory", "invseeplusplus.clone.enderchest"]),
+        node("invseeplusplus.clone.inventory", Some(access.clone_inventory as i32), &[]),
+        node("invseeplusplus.clone.enderchest", Some(access.clone_enderchest as i32), &[]),
         node("invseeplusplus.exempt.invsee", None, &[]),
         node("invseeplusplus.exempt.endersee", None, &[]),
         node("invseeplusplus.bypass-exempt.invsee", None, &[]),
@@ -745,8 +813,9 @@ fn perform_try(host: &mut dyn ServerHost, uuid: u128, name: &str, line: &str) ->
 }
 
 /// The console's command line; the core's lines, or None when it is not ours or the state is in use.
-fn console_try(line: &str) -> Option<Option<Vec<String>>> {
-    with(|m| m.console(line))
+fn console_try(host: &mut dyn ServerHost, line: &str) -> Option<Option<Vec<String>>> {
+    let mut game = GameHost::new(host);
+    with(|m| m.console_with(&mut game, line))
 }
 
 /// The command as the core reads a line: its literals, then its text and word arguments.
@@ -773,7 +842,7 @@ fn tick(game: &mut GameHost<'_>) {
                     }
                 }
                 None => {
-                    for l in console_try(line).flatten().unwrap_or_default() {
+                    for l in console_try(&mut *game.host, line).flatten().unwrap_or_default() {
                         eprint_line(&l);
                     }
                 }
@@ -824,7 +893,7 @@ impl Hooks for Mod {
             let word = usage.split_whitespace().next().unwrap_or_default();
             event
                 .commands
-                .push(Command::op(&usage, level).with_node(&bool_node(node_of_word(word))));
+                .push(Command::op(&usage, level).with_node(&bool_node(&node_of_word(word))));
         }
     }
 
@@ -868,11 +937,11 @@ impl Hooks for Mod {
             }
             return Flow::Cancel;
         }
-        if !OWN_WORDS.contains(&root.as_str()) {
+        if !is_own(&root) {
             return Flow::Continue;
         }
         let uuid = event.player;
-        let allowed = has(host, uuid, node_of_word(&root));
+        let allowed = has(host, uuid, &node_of_word(&root));
         if allowed {
             return Flow::Continue;
         }
@@ -883,12 +952,41 @@ impl Hooks for Mod {
         Flow::Cancel
     }
 
+    /// The service `invsee:api`: `subscribe <mod id>` / `unsubscribe <mod id>` for the spectator inventory events (the
+    /// mod's own service `<id>:invsee_event` is then called with `<event>\t<spectator>\t<target>\t<name>\t<view>`;
+    /// the save event is cancelled by the reply `cancel`), `version`.
+    fn mod_service_call(&self, _: &mut dyn ServerHost, event: &mut ModServiceCallEvent<'_>) -> Option<PayloadBytes> {
+        if event.service != "invsee:api" {
+            return None;
+        }
+        let text = std::str::from_utf8(&event.payload.0).ok()?;
+        let mut parts = text.split('\t');
+        let reply = match parts.next()? {
+            "version" => "0".to_owned(),
+            "subscribe" => {
+                let id = parts.next()?;
+                let mut subs = SUBSCRIBERS.lock().unwrap_or_else(|e| e.into_inner());
+                if !subs.iter().any(|s| s == id) {
+                    subs.push(id.to_owned());
+                }
+                "true".to_owned()
+            }
+            "unsubscribe" => {
+                let id = parts.next()?;
+                SUBSCRIBERS.lock().unwrap_or_else(|e| e.into_inner()).retain(|s| s != id);
+                "true".to_owned()
+            }
+            _ => return None,
+        };
+        Some(PayloadBytes(reply.into_bytes()))
+    }
+
     fn run_mod_command(&self, host: &mut dyn ServerHost, event: &mut RunModCommandEvent<'_>) -> Flow {
         let ours = event
             .command
             .literals
             .first()
-            .is_some_and(|w| OWN_WORDS.contains(&w.as_str()));
+            .is_some_and(|w| is_own(w.as_str()));
         if !ours {
             return Flow::Continue;
         }
@@ -906,7 +1004,7 @@ impl Hooks for Mod {
                 answer
             }
             CommandSource::Console { .. } => {
-                let answer = console_try(&line);
+                let answer = console_try(host, &line);
                 if answer.is_none() {
                     defer(Deferred::Command(None, line));
                     return Flow::Cancel;

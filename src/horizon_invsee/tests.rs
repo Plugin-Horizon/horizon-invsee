@@ -1,5 +1,6 @@
 //! The whole flow against a fake game: commands, opening, clicks, live refresh, closing, logs.
 use super::*;
+use super::addons::{split_give, split_item, Queued, Queues};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -43,6 +44,11 @@ struct Fake {
     cursors: HashMap<u128, Option<St>>,
     open: HashMap<u128, String>,
     grids: HashMap<u128, Vec<Option<St>>>,
+    /// Item tags by name.
+    tags: HashMap<String, Vec<String>>,
+    /// The events other mods were told, and whether one of them cancels the save event.
+    events: Vec<String>,
+    cancel_save: bool,
 }
 
 const ADMIN: u128 = 1;
@@ -259,6 +265,25 @@ impl Host for Fake {
     }
     fn describe(&self, s: &St) -> (String, u32) {
         (s.item.clone(), s.count)
+    }
+    fn item_ids(&self) -> Vec<String> {
+        ["diamond", "stone", "bread", "oak_log", "birch_log", "diamond_sword", "iron_helmet", "bucket"]
+            .iter()
+            .map(|i| format!("minecraft:{i}"))
+            .collect()
+    }
+    fn make_stack(&self, item: &str, components: Option<&str>) -> Result<St, String> {
+        if !self.item_ids().iter().any(|i| i == item) {
+            return Err(format!("Unknown item '{item}'"));
+        }
+        Ok(St { item: item.into(), count: 1, name: components.map(|c| format!("[{c}]")) })
+    }
+    fn tag_items(&self, tag: &str) -> Vec<String> {
+        self.tags.get(tag).cloned().unwrap_or_default()
+    }
+    fn event(&mut self, line: &str) -> bool {
+        self.events.push(line.replace('\t', "|"));
+        self.cancel_save && line.starts_with("spectator_inventory_save")
     }
     fn server_dir(&self) -> Option<PathBuf> {
         Some(self.dir.clone())
@@ -875,4 +900,200 @@ fn a_view_shows_the_placeholder_of_the_targets_container() {
     let items = f.menu(ADMIN).3.clone();
     assert_eq!(items[45].as_ref().unwrap().name.as_deref(), Some("§bAnvil input"));
     assert_eq!(items[47].as_ref().unwrap().name.as_deref(), Some("§4"), "past the anvil's two slots");
+}
+
+// ---- the addons ----------------------------------------------------------------------------------------------
+
+fn run(m: &mut InvSee<St>, f: &mut Fake, who: u128, name: &str, line: &str) -> Vec<String> {
+    let out = m.perform(f, who, name, line).expect("an addon command");
+    m.tick(f);
+    out
+}
+
+#[test]
+fn give_adds_to_the_target_and_tells_the_sender() {
+    let (mut m, mut f) = setup();
+    assert_eq!(run(&mut m, &mut f, ADMIN, "Admin", "invgive Bob diamond 5"), Vec::<String>::new());
+    assert_eq!(f.get(BOB, Kind::Inventory, 0), Some(st("diamond", 5)));
+    assert_eq!(f.told(ADMIN), vec!["§aAdded ItemStack{DIAMOND x 5} to Bob's inventory!"]);
+    // The alias, the amount 1 default and a component patch.
+    run(&mut m, &mut f, ADMIN, "Admin", "igive Bob bread[custom_name='\"x\"']");
+    let s = f.get(BOB, Kind::Inventory, 1).unwrap();
+    assert_eq!((s.item.as_str(), s.count), ("minecraft:bread", 1));
+    assert_eq!(s.name.as_deref(), Some("[custom_name='\"x\"']"));
+}
+
+#[test]
+fn give_fills_partial_stacks_then_empty_slots_and_splits_big_amounts() {
+    let (mut m, mut f) = setup();
+    f.set(BOB, Kind::Inventory, 4, Some(st("diamond", 60)));
+    run(&mut m, &mut f, ADMIN, "Admin", "invgive Bob diamond 70");
+    assert_eq!(f.get(BOB, Kind::Inventory, 4), Some(st("diamond", 64)));
+    assert_eq!(f.get(BOB, Kind::Inventory, 0), Some(st("diamond", 64)));
+    assert_eq!(f.get(BOB, Kind::Inventory, 1), Some(st("diamond", 2)));
+}
+
+#[test]
+fn give_to_a_full_inventory_queues_the_rest_and_the_login_delivers_it() {
+    let (mut m, mut f) = setup();
+    for s in 0..36 {
+        f.set(BOB, Kind::Inventory, s, Some(st("stone", 64)));
+    }
+    f.set(BOB, Kind::Inventory, 9, Some(st("diamond", 62)));
+    run(&mut m, &mut f, ADMIN, "Admin", "invgive Bob diamond 5");
+    assert_eq!(f.get(BOB, Kind::Inventory, 9), Some(st("diamond", 64)));
+    assert_eq!(
+        f.told(ADMIN),
+        vec!["§eCould not add the following items to the player's inventory: ItemStack{DIAMOND x 3}, enqueuing.."]
+    );
+    let dir = f.data_dir().unwrap();
+    let queued = Queues::load(&dir, BOB);
+    assert_eq!(queued.inventory, vec![Queued { item: "minecraft:diamond".into(), components: None, count: 3 }]);
+    // Room again; Bob logs in: the queue is delivered and the file removed.
+    f.set(BOB, Kind::Inventory, 20, None);
+    m.logged_in(BOB, "Bob");
+    m.tick(&mut f);
+    assert_eq!(f.get(BOB, Kind::Inventory, 20), Some(st("diamond", 3)));
+    assert_eq!(Queues::load(&dir, BOB), Queues::default());
+    assert!(f.logged.iter().any(|l| l == "[Queue] Added ItemStack{DIAMOND x 3} to Bob's inventory!"));
+}
+
+#[test]
+fn give_without_the_queue_says_what_did_not_fit() {
+    let (mut m, mut f) = setup();
+    m.load_config("[give]\nqueue_remaining_items = false\n", None);
+    for s in 0..36 {
+        f.set(BOB, Kind::Inventory, s, Some(st("stone", 64)));
+    }
+    run(&mut m, &mut f, ADMIN, "Admin", "invgive Bob bread 2");
+    assert_eq!(f.told(ADMIN), vec!["§cCould not add the following items to the player's inventory: ItemStack{BREAD x 2}"]);
+    assert_eq!(Queues::load(&f.data_dir().unwrap(), BOB), Queues::default());
+}
+
+#[test]
+fn give_refuses_what_the_original_refuses() {
+    let (mut m, mut f) = setup();
+    assert_eq!(run(&mut m, &mut f, ADMIN, "Admin", "invgive Bob"), vec!["/invgive <target player> <item type> [<amount>] [<nbt tag>]"]);
+    assert_eq!(run(&mut m, &mut f, ADMIN, "Admin", "invgive Bob diamond 0"), vec!["§c0 is not a positive integer."]);
+    assert_eq!(run(&mut m, &mut f, ADMIN, "Admin", "invgive Bob nothing 3"), vec!["§cUnknown item 'nothing'"]);
+    assert_eq!(
+        run(&mut m, &mut f, ADMIN, "Admin", "invgive Bob diamond 3 {a:1}"),
+        vec!["§cInvSee++ for Minecraft 1.20.5 and up does not support NBT tags on item stacks."]
+    );
+    // A level-0 player has no permission.
+    assert_eq!(run(&mut m, &mut f, BOB, "Bob", "invgive Admin diamond"), vec![NO_PERMISSION.to_string()]);
+    run(&mut m, &mut f, ADMIN, "Admin", "invgive Nobody diamond");
+    assert_eq!(f.told(ADMIN), vec!["§cUnknown player: Nobody"]);
+}
+
+#[test]
+fn give_to_an_offline_player_writes_the_file_and_honours_the_support_setting() {
+    let (mut m, mut f) = setup();
+    f.profiles.push((CAROL, "Carol".into()));
+    run(&mut m, &mut f, ADMIN, "Admin", "endergive Carol diamond 2");
+    assert_eq!(f.get(CAROL, Kind::Ender, 0), Some(st("diamond", 2)));
+    assert_eq!(f.told(ADMIN), vec!["§aAdded ItemStack{DIAMOND x 2} to Carol's enderchest!"]);
+    assert!(f.events.iter().any(|e| e.starts_with("spectator_inventory_save|")), "an offline save is announced");
+    f.told.clear();
+    m.load_config("[give]\noffline_player_support = false\n", None);
+    run(&mut m, &mut f, ADMIN, "Admin", "endergive Carol diamond 2");
+    assert_eq!(f.told(ADMIN), vec!["§cSpectating offline players' enderchest is disabled."]);
+    run(&mut m, &mut f, ADMIN, "Admin", "invgive Carol diamond 2");
+    assert_eq!(f.told(ADMIN)[1], "§cSpectating offline players' inventories is disabled.");
+}
+
+#[test]
+fn a_cancelled_save_event_stops_the_write_of_an_offline_target() {
+    let (mut m, mut f) = setup();
+    f.profiles.push((CAROL, "Carol".into()));
+    f.cancel_save = true;
+    run(&mut m, &mut f, ADMIN, "Admin", "invgive Carol diamond 2");
+    assert_eq!(f.get(CAROL, Kind::Inventory, 0), None);
+}
+
+#[test]
+fn clear_removes_all_an_item_at_most_n_or_a_tag() {
+    let (mut m, mut f) = setup();
+    f.tags.insert("minecraft:logs".into(), vec!["minecraft:oak_log".into(), "minecraft:birch_log".into()]);
+    for (slot, s) in [(0, st("diamond", 10)), (1, st("stone", 5)), (2, st("diamond", 7)), (3, st("oak_log", 4)), (4, st("birch_log", 6))] {
+        f.set(BOB, Kind::Inventory, slot, Some(s));
+    }
+    run(&mut m, &mut f, ADMIN, "Admin", "invclear Bob diamond 12");
+    assert_eq!(f.told(ADMIN), vec!["§aRemoved 12 DIAMOND from Bob's inventory."]);
+    assert_eq!(f.get(BOB, Kind::Inventory, 0), None);
+    assert_eq!(f.get(BOB, Kind::Inventory, 2), Some(st("diamond", 5)));
+    run(&mut m, &mut f, ADMIN, "Admin", "iclear Bob logs");
+    assert_eq!(f.told(ADMIN)[1], "§aRemoved all minecraft:logs from Bob's inventory.");
+    assert_eq!(f.get(BOB, Kind::Inventory, 3), None);
+    assert_eq!(f.get(BOB, Kind::Inventory, 4), None);
+    assert_eq!(f.get(BOB, Kind::Inventory, 1), Some(st("stone", 5)));
+    run(&mut m, &mut f, ADMIN, "Admin", "invclear Bob");
+    assert_eq!(f.told(ADMIN)[2], "§aCleared Bob's inventory.");
+    assert!(f.invs[&(BOB, Kind::Inventory)].iter().all(Option::is_none));
+    assert_eq!(run(&mut m, &mut f, ADMIN, "Admin", "enderclear Bob nothing"), vec!["§cMaterial nothing does not exist."]);
+}
+
+#[test]
+fn clone_copies_an_inventory_to_the_sender_or_to_a_target() {
+    let (mut m, mut f) = setup();
+    f.set(BOB, Kind::Inventory, 0, Some(st("diamond", 3)));
+    f.set(BOB, Kind::Inventory, 38, Some(st("iron_helmet", 1)));
+    f.set(ADMIN, Kind::Inventory, 5, Some(st("bread", 9)));
+    run(&mut m, &mut f, ADMIN, "Admin", "invclone Bob");
+    assert_eq!(f.told(ADMIN), vec!["§aCloned Bob's inventory to Admin."]);
+    assert_eq!(f.get(ADMIN, Kind::Inventory, 0), Some(st("diamond", 3)));
+    assert_eq!(f.get(ADMIN, Kind::Inventory, 38), Some(st("iron_helmet", 1)));
+    assert_eq!(f.get(ADMIN, Kind::Inventory, 5), None, "the target's own contents are replaced");
+    f.set(BOB, Kind::Ender, 2, Some(st("stone", 1)));
+    run(&mut m, &mut f, ADMIN, "Admin", "eclone Bob Helper");
+    assert_eq!(f.told(ADMIN)[1], "§aCloned Bob's enderchest to Helper.");
+    assert_eq!(f.get(HELPER, Kind::Ender, 2), Some(st("stone", 1)));
+    run(&mut m, &mut f, ADMIN, "Admin", "invclone Nobody");
+    assert_eq!(f.told(ADMIN)[2], "§cPlayer Nobody does not exist.");
+}
+
+#[test]
+fn the_console_runs_the_addons_and_answers_in_the_log() {
+    let (mut m, mut f) = setup();
+    assert_eq!(m.console_with(&mut f, "invclone Bob"), Some(vec!["§cEither execute this command as a player, or provide a target player.".into()]));
+    assert_eq!(m.console_with(&mut f, "invgive Bob diamond 2"), Some(vec![]));
+    m.tick(&mut f);
+    assert_eq!(f.get(BOB, Kind::Inventory, 0), Some(st("diamond", 2)));
+    assert_eq!(f.logged.last().map(String::as_str), Some("Added ItemStack{DIAMOND x 2} to Bob's inventory!"));
+    assert_eq!(m.console_with(&mut f, "invsee"), Some(vec!["/invsee <username>|<uuid>".into()]));
+}
+
+#[test]
+fn the_view_announces_an_offline_inventory() {
+    let (mut m, mut f) = setup();
+    f.profiles.push((CAROL, "Carol".into()));
+    m.perform(&mut f, ADMIN, "Admin", "invsee Carol");
+    m.tick(&mut f);
+    assert!(f.events.iter().any(|e| e.starts_with("spectator_inventory_offline_created|")));
+}
+
+#[test]
+fn the_formats_of_give_are_split_as_the_original_does() {
+    assert_eq!(split_give(&["bob"]), None);
+    let g = split_give(&["bob", "stick", "3"]).unwrap();
+    assert_eq!((g.item.as_str(), g.amount.as_deref(), g.tag), ("stick", Some("3"), None));
+    let g = split_give(&["bob", "stick[a=1,", "b=2]", "3"]).unwrap();
+    assert_eq!(g.item, "stick[a=1, b=2]");
+    let g = split_give(&["bob", "stick", "3", "{a:1}"]).unwrap();
+    assert_eq!(g.tag.as_deref(), Some("{a:1}"));
+    let g = split_give(&["bob", "stick"]).unwrap();
+    assert_eq!((g.amount, g.tag), (None, None));
+    assert_eq!(split_item("minecraft:stick[a=1]").unwrap(), ("minecraft:stick".into(), Some("a=1".into())));
+    assert!(split_item("stick[a=1").is_err());
+}
+
+#[test]
+fn addon_tab_completion_offers_names_items_and_amounts() {
+    let (mut m, mut f) = setup();
+    let (start, names) = m.tab_complete(&mut f, ADMIN, "/invgive bo").unwrap();
+    assert_eq!((start, names), (9, vec!["Bob".to_string()]));
+    let (_, items) = m.tab_complete(&mut f, ADMIN, "/invgive Bob dia").unwrap();
+    assert_eq!(items, vec!["diamond".to_string(), "diamond_sword".to_string()]);
+    let (_, amounts) = m.tab_complete(&mut f, ADMIN, "/invgive Bob diamond 6").unwrap();
+    assert!(amounts.contains(&"64".to_string()) && !amounts.contains(&"7".to_string()));
 }

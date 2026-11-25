@@ -14,6 +14,8 @@ pub struct Config {
     pub templates: Templates,
     pub menu: Menu,
     pub logging: Logging,
+    pub give: Give,
+    pub clear: Clear,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -27,6 +29,124 @@ pub struct Access {
     pub bypass_exempt: u8,
     pub exempt_invsee: Vec<String>,
     pub exempt_endersee: Vec<String>,
+    /// The addon commands (`/invgive`, `/endergive`, `/invclear`, `/enderclear`, `/invclone`, `/enderclone`).
+    pub give_inventory: u8,
+    pub give_enderchest: u8,
+    pub clear_inventory: u8,
+    pub clear_enderchest: u8,
+    pub clone_inventory: u8,
+    pub clone_enderchest: u8,
+}
+
+/// `offline-player-support` / `unknown-player-support` of the Give and Clear addons: `true`, `false`,
+/// `same_as_InvSee++` (this mod's `[players]` value) or `same_as_InvseeAPI` (the API's default, the same value here).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Support {
+    Yes,
+    No,
+    SameAsInvSee,
+    SameAsApi,
+}
+
+impl<'de> Deserialize<'de> for Support {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Bool(bool),
+            Text(String),
+        }
+        Ok(match Raw::deserialize(d)? {
+            Raw::Bool(true) => Support::Yes,
+            Raw::Bool(false) => Support::No,
+            Raw::Text(t) => match t.to_ascii_lowercase().as_str() {
+                "true" => Support::Yes,
+                "false" => Support::No,
+                "same_as_invsee++" => Support::SameAsInvSee,
+                "same_as_invseeapi" => Support::SameAsApi,
+                // The addons fall back to true for any other text.
+                _ => Support::Yes,
+            },
+        })
+    }
+}
+
+impl Support {
+    /// The value, given what `[players]` says.
+    pub fn resolve(&self, main: bool) -> bool {
+        match self {
+            Support::Yes => true,
+            Support::No => false,
+            Support::SameAsInvSee | Support::SameAsApi => main,
+        }
+    }
+}
+
+/// `bypass-exempt` of the addons: `true`, `false` or `permission` (the sender's own bypass node decides).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Bypass {
+    Yes,
+    No,
+    Permission,
+}
+
+impl<'de> Deserialize<'de> for Bypass {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Bool(bool),
+            Text(String),
+        }
+        Ok(match Raw::deserialize(d)? {
+            Raw::Bool(true) => Bypass::Yes,
+            Raw::Bool(false) => Bypass::No,
+            Raw::Text(t) => match t.to_ascii_lowercase().as_str() {
+                "true" => Bypass::Yes,
+                "false" => Bypass::No,
+                _ => Bypass::Permission,
+            },
+        })
+    }
+}
+
+/// `InvSee++_Give`'s config.yml.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct Give {
+    pub offline_player_support: Support,
+    pub unknown_player_support: Support,
+    pub bypass_exempt: Bypass,
+    /// Keep the partly added items when the rest did not fit.
+    pub save_partial_inventories: bool,
+    /// Queue what did not fit for the player's next login.
+    pub queue_remaining_items: bool,
+}
+
+/// `InvSee++_Clear`'s config.yml.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct Clear {
+    pub offline_player_support: Support,
+    pub bypass_exempt: Bypass,
+}
+
+impl Default for Give {
+    fn default() -> Self {
+        Give {
+            offline_player_support: Support::Yes,
+            unknown_player_support: Support::Yes,
+            bypass_exempt: Bypass::Permission,
+            save_partial_inventories: true,
+            queue_remaining_items: true,
+        }
+    }
+}
+
+impl Default for Clear {
+    fn default() -> Self {
+        Clear { offline_player_support: Support::Yes, bypass_exempt: Bypass::Permission }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -149,6 +269,8 @@ impl Default for Config {
             templates: Templates::default(),
             menu: Menu::default(),
             logging: Logging::default(),
+            give: Give::default(),
+            clear: Clear::default(),
         }
     }
 }
@@ -167,6 +289,12 @@ impl Default for Access {
             bypass_exempt: 5,
             exempt_invsee: Vec::new(),
             exempt_endersee: Vec::new(),
+            give_inventory: 1,
+            give_enderchest: 1,
+            clear_inventory: 1,
+            clear_enderchest: 1,
+            clone_inventory: 1,
+            clone_enderchest: 1,
         }
     }
 }
@@ -246,6 +374,12 @@ impl Config {
             &mut c.access.endersee_view,
             &mut c.access.endersee_edit,
             &mut c.access.reload,
+            &mut c.access.give_inventory,
+            &mut c.access.give_enderchest,
+            &mut c.access.clear_inventory,
+            &mut c.access.clear_enderchest,
+            &mut c.access.clone_inventory,
+            &mut c.access.clone_enderchest,
         ] {
             *l = (*l).min(4);
         }
@@ -293,5 +427,24 @@ mod tests {
         assert!(Config::parse("[access]\nnope = 1\n").is_err());
         assert!(Config::parse("[menu]\nplaceholder_palette = \"neon\"\n").is_err());
         assert!(Config::parse("[logging]\ngranularity = \"SOMETIMES\"\n").is_err());
+    }
+
+    #[test]
+    fn the_addon_settings_read_every_spelling() {
+        let c = Config::parse(
+            "[give]\noffline_player_support = \"same_as_InvSee++\"\nunknown_player_support = false\nbypass_exempt = true\nsave_partial_inventories = false\nqueue_remaining_items = false\n[clear]\nbypass_exempt = \"permission\"\noffline_player_support = \"same_as_InvseeAPI\"\n[access]\ngive_inventory = 3\nclone_enderchest = 9\n",
+        )
+        .unwrap();
+        assert_eq!(c.give.offline_player_support, Support::SameAsInvSee);
+        assert!(!c.give.offline_player_support.resolve(false));
+        assert!(c.give.offline_player_support.resolve(true));
+        assert_eq!(c.give.unknown_player_support, Support::No);
+        assert_eq!(c.give.bypass_exempt, Bypass::Yes);
+        assert!(!c.give.save_partial_inventories && !c.give.queue_remaining_items);
+        assert_eq!(c.clear.bypass_exempt, Bypass::Permission);
+        assert_eq!(c.clear.offline_player_support, Support::SameAsApi);
+        assert_eq!(c.access.give_inventory, 3);
+        assert_eq!(c.access.clone_enderchest, 4);
+        assert_eq!(c.access.clear_inventory, 1);
     }
 }
