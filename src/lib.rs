@@ -666,7 +666,7 @@ impl inv::Host for GameHost<'_> {
         let tags = self.host.tags();
         let Some(key) = tags.key(&id) else { return Vec::new() };
         let Some(items) = tags.items(key) else { return Vec::new() };
-        items.into_iter().map(|k| self.host.item_key_id(k)).collect()
+        items.into_iter().map(|k| k.id(&*self.host)).collect()
     }
 
     /// The spectator inventory events, as service calls to the mods that subscribed. A reply of `cancel` cancels the

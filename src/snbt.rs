@@ -264,7 +264,7 @@ mod tests {
     #[test]
     fn components_take_a_namespace_and_removals() {
         let p = parse_components("custom_name='\"Hi\"',!minecraft:lore,minecraft:damage=3").unwrap();
-        let keys: Vec<String> = p.keys().map(|k| k.to_string_lossy().into_owned()).collect();
+        let keys: Vec<String> = p.keys().map(|k| k.to_string_lossy()).collect();
         assert!(keys.contains(&"minecraft:custom_name".to_string()));
         assert!(keys.contains(&"!minecraft:lore".to_string()));
         assert!(keys.contains(&"minecraft:damage".to_string()));
