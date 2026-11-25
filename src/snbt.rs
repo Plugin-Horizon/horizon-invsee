@@ -66,9 +66,13 @@ impl<'a> Reader<'a> {
     }
 
     fn bare(&mut self) -> String {
+        self.bare_with(true)
+    }
+
+    fn bare_with(&mut self, colon: bool) -> String {
         let start = self.at;
         while let Some(c) = self.peek() {
-            if c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'.' | b'+' | b':' | b'/') {
+            if c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'.' | b'+' | b'/') || (colon && c == b':') {
                 self.at += 1;
             } else {
                 break;
@@ -78,11 +82,15 @@ impl<'a> Reader<'a> {
     }
 
     fn key(&mut self) -> R<String> {
+        self.key_with(true)
+    }
+
+    fn key_with(&mut self, colon: bool) -> R<String> {
         self.ws();
         match self.peek() {
             Some(b'"') | Some(b'\'') => self.quoted(),
             _ => {
-                let k = self.bare();
+                let k = self.bare_with(colon);
                 if k.is_empty() {
                     Err(format!("Expected a key at position {}", self.at))
                 } else {
@@ -102,7 +110,7 @@ impl<'a> Reader<'a> {
                     return Ok(Tag::Compound(c));
                 }
                 loop {
-                    let k = self.key()?;
+                    let k = self.key_with(false)?;
                     self.expect(b':')?;
                     let v = self.value()?;
                     c.insert(k.as_str().into(), v);

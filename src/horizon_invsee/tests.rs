@@ -1046,6 +1046,7 @@ fn clone_copies_an_inventory_to_the_sender_or_to_a_target() {
     assert_eq!(f.get(ADMIN, Kind::Inventory, 5), None, "the target's own contents are replaced");
     f.set(BOB, Kind::Ender, 2, Some(st("stone", 1)));
     run(&mut m, &mut f, ADMIN, "Admin", "eclone Bob Helper");
+    m.tick(&mut f); // the target is resolved one tick after the source
     assert_eq!(f.told(ADMIN)[1], "§aCloned Bob's enderchest to Helper.");
     assert_eq!(f.get(HELPER, Kind::Ender, 2), Some(st("stone", 1)));
     run(&mut m, &mut f, ADMIN, "Admin", "invclone Nobody");
