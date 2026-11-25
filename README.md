@@ -88,7 +88,7 @@ horizon-launcher native-build <path to this folder> --server-output <dir> --vers
 
 Round 2 (2026-11-25): offline inventories and ender chests are read and written through the game's saved-player API, the log goes to the server console, `invseeplusplus.*` and the nobody-default nodes are declared. Still open:
 
-- The view follows the target every tick and clicks use vanilla's rules (cursor, drag, shift click, number keys, double click), but it is the mod's own menu, not the target's container (engine: `menu_view_player_container`): throws and middle clicks do nothing, and the target's cursor and crafting grid are shown, not edited.
+- Round 3: a viewer with the edit node gets the game's live view of an online target (`open_player_view`: the slots are the target's own, throws and middle clicks work, armour and off hand take any stack). Its layout is the game's (five rows for an inventory), so the template's placeholders are not shown there, and the log of a live view is the difference of the target's slots at open and close. Viewers without the edit node, offline and never-played targets keep the mod's copy menu. The target's cursor and crafting grid are not part of the game's view.
 - The target's anvil, merchant and other workstation inputs cannot be read (only their placeholders are shown).
 - The `permission plugin` resolve strategy answers nothing (GroupManager, BungeePerms and UltraPermissions are not installed); the `proxy` strategy (BungeeCord channel) is not wired. `player data` answers from the saved file's last known name for a UUID and from `usercache.json` for a name.
 

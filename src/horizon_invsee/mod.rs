@@ -321,6 +321,9 @@ struct Session<S> {
     /// The game's own inventory menu (`open_inventory_menu`): it follows and edits the target
     /// itself, so the mod neither refreshes nor handles its clicks (nor logs single items).
     live: bool,
+    /// The target's slots when a live view opened: what the view changed is the difference to the
+    /// slots at its close, which is what the log of a live view says.
+    baseline: Vec<Option<S>>,
     /// A drag the spectator has started.
     drag: Option<click::Drag>,
 }
@@ -1043,6 +1046,7 @@ impl<S: Clone + PartialEq> InvSee<S> {
             taken: Vec::new(),
             given: Vec::new(),
             live,
+            baseline: if live { slots.clone() } else { Vec::new() },
             drag: None,
         });
     }
@@ -1358,7 +1362,17 @@ impl<S: Clone + PartialEq> InvSee<S> {
         self.pending.clear();
     }
 
-    fn finish<H: Host<Stack = S>>(&mut self, host: &mut H, s: Session<S>) {
+    fn finish<H: Host<Stack = S>>(&mut self, host: &mut H, mut s: Session<S>) {
+        // The game ran the clicks of a live view: what changed is read from the target's slots now.
+        if s.live {
+            if let Ok(now) = host.inventory(s.target, s.kind) {
+                let (mut taken, mut given) = (Vec::new(), Vec::new());
+                for (old, new) in s.baseline.iter().zip(now.slots.iter()) {
+                    changes(&*host, old, new, &mut taken, &mut given);
+                }
+                (s.taken, s.given) = net(taken, given);
+            }
+        }
         if self.cfg.logging.granularity == Granularity::OnClose
             && (!s.taken.is_empty() || !s.given.is_empty())
         {

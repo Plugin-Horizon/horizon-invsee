@@ -10,7 +10,7 @@ use mod_api::{
     Command, CommandArgumentValue, CommandInvocation, CommandSource, Compound, Config, ConfigKind,
     ConfigLoadingEvent, ConfigReloadingEvent, Flow, HostSide, HostTransaction, Hooks, Identifier, ItemPlace,
     ItemResource, ItemStack, PlayerContainerCloseEvent, PlayerContainerOpenEvent, TransactionSeal,
-    MenuClickedEvent, MenuClosedEvent, MenuReplace, NodeDefault, PermissionGatherNodesEvent,
+    MenuClickedEvent, MenuClosedEvent, MenuReplace, PlayerViewKind, NodeDefault, PermissionGatherNodesEvent,
     PermissionLevel, PermissionNode, PermissionValueType, PlayerCommandEvent, PlayerLoggedInEvent,
     PlayerLoggedOutEvent, RegisterNodeCommandsEvent, RegisterConfigsEvent, RunModCommandEvent,
     ServerHost, ServerStoppingEvent, ServerTickEvent, ServerTickPhase, Suggestion,
@@ -400,9 +400,32 @@ impl inv::Host for GameHost<'_> {
         window
     }
 
-    // `open_inventory_menu` is not overridden: the core's default (None) makes it use `open_menu`.
-    // TODO(arismoko-api: menu_open_inventory): a live menu over the target's slots (drag, split,
-    // armour) is missing; the view is a snapshot taken when it opens.
+    /// The game's live view of another online player's inventory or ender chest (`open_player_view`):
+    /// its slots are the target's own, clicks run by vanilla's rules and the target's changes show on
+    /// the next tick. The game's layout is fixed (the placeholders of the template are not shown),
+    /// so `_layout` is not read. None (the mod then opens its copy) for one's own inventory, a target
+    /// who is not online and any refusal.
+    fn open_inventory_menu(
+        &mut self,
+        viewer: u128,
+        _rows: u8,
+        title: &str,
+        target: (u128, Kind),
+        _layout: &[Option<usize>],
+    ) -> Option<i32> {
+        if viewer == target.0 {
+            return None;
+        }
+        let kind = match target.1 {
+            Kind::Inventory => PlayerViewKind::Inventory,
+            Kind::Ender => PlayerViewKind::EnderChest,
+        };
+        let title = text(&*self.host, title);
+        self.host
+            .open_player_view(viewer, target.0, kind, title, MenuReplace::CloseFirst)
+            .ok()
+            .flatten()
+    }
 
     fn with_count(&self, stack: &ItemStack, count: u32) -> Option<ItemStack> {
         let mut split = stack.clone();

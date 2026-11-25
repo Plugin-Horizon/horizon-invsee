@@ -661,6 +661,24 @@ fn an_editor_gets_the_games_live_inventory_menu_and_a_viewer_the_copy() {
 }
 
 #[test]
+fn a_live_view_is_logged_from_what_changed_in_the_target() {
+    let (mut m, mut f) = setup();
+    m.load_config("[access]\ninvsee_view = 1\ninvsee_edit = 3\n", None);
+    f.live = true;
+    f.set(BOB, Kind::Inventory, 3, Some(st("diamond", 5)));
+    m.perform(&mut f, ADMIN, "Admin", "invsee bob");
+    m.tick(&mut f);
+    let (window, _, _) = f.live_menus.get(&ADMIN).cloned().expect("live menu");
+    // The game runs the clicks: the diamonds leave Bob, stone arrives.
+    f.set(BOB, Kind::Inventory, 3, None);
+    f.set(BOB, Kind::Inventory, 7, Some(st("stone", 2)));
+    m.closed(&mut f, ADMIN, window);
+    let log = std::fs::read_to_string(f.dir.join("world/invsee/InvSee++ logs/_global.log")).unwrap();
+    assert!(log.contains("Taken         : [DIAMOND x 5]"), "{log}");
+    assert!(log.contains("Given         : [STONE x 2]"), "{log}");
+}
+
+#[test]
 fn a_right_click_takes_the_larger_half() {
     let (mut m, mut f) = setup();
     f.set(BOB, Kind::Inventory, 3, Some(st("diamond", 5)));
