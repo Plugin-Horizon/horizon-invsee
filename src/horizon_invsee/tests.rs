@@ -105,7 +105,7 @@ impl Host for Fake {
     fn players(&self) -> Vec<Online> {
         self.players.clone()
     }
-    fn inventory(&self, uuid: u128, kind: Kind) -> Result<Inv<St>, InvError> {
+    fn inventory(&mut self, uuid: u128, kind: Kind) -> Result<Inv<St>, InvError> {
         if !self.known.contains(&uuid) {
             return Err(InvError::from_horizon("no saved player"));
         }

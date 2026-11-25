@@ -1,7 +1,5 @@
 //! invsee as an arismoko native trait mod (`mod_api`). The logic is the unchanged `horizon-invsee`
-//! crate (`core/`); this file wires its hooks and its `Host` to arismoko's API. Where arismoko has
-//! no API yet the mapping falls back and says so with a `TODO(arismoko-api: ...)`; PORT_NOTES.md
-//! lists them all.
+//! crate (`core/`); this file wires its hooks and its `Host` to the mod API.
 //!
 //! Config: `config/invsee-server.toml` (`ConfigKind::Server`, written from the default when missing,
 //! read again when it changes).
@@ -16,7 +14,7 @@ use mod_api::{
     PermissionLevel, PermissionNode, PermissionValueType, PlayerCommandEvent, PlayerLoggedInEvent,
     PlayerLoggedOutEvent, RegisterNodeCommandsEvent, RegisterConfigsEvent, RunModCommandEvent,
     ServerHost, ServerStoppingEvent, ServerTickEvent, ServerTickPhase, Suggestion,
-    TabCompleteEvent, Tag, Text,
+    TabCompleteEvent, Tag, Text, PlayerInventoryError, PlayerInventoryKind, PlayerInventoryMove,
 };
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -181,6 +179,96 @@ fn legacy_colour(code: char) -> Option<&'static str> {
     })
 }
 
+/// The words the core sorts a failed offline read by (`InvError::from_horizon`).
+fn offline_error(e: &PlayerInventoryError) -> String {
+    match e {
+        PlayerInventoryError::NoSavedPlayer => "no saved player".into(),
+        PlayerInventoryError::LoggingIn => "the player is logging in".into(),
+        PlayerInventoryError::Dead => "the player is dead".into(),
+        PlayerInventoryError::SwappedOut => "inside a player's turn".into(),
+        PlayerInventoryError::StackChanged => "the slot changed".into(),
+        PlayerInventoryError::NoRoom => "no free slot".into(),
+        other => format!("{other:?}"),
+    }
+}
+
+/// The name Paper keeps in a saved player file (`bukkit.lastKnownName`).
+fn last_known_name(data: &Compound) -> Option<String> {
+    for (k, v) in data {
+        if k.to_string_lossy() != "bukkit" {
+            continue;
+        }
+        let Tag::Compound(bukkit) = v else { continue };
+        for (bk, bv) in bukkit {
+            if let (true, Tag::String(name)) = (bk.to_string_lossy() == "lastKnownName", bv) {
+                return Some(name.to_string_lossy());
+            }
+        }
+    }
+    None
+}
+
+/// `Slot` of a saved item compound.
+fn saved_slot(tag: &Tag) -> Option<i8> {
+    let Tag::Compound(map) = tag else { return None };
+    map.iter().find_map(|(k, v)| {
+        let name = k.to_string_lossy();
+        match (&*name, v) {
+            ("Slot", Tag::Byte(b)) => Some(*b),
+            _ => None,
+        }
+    })
+}
+
+impl GameHost<'_> {
+    /// One slot of a saved player's file written (`set_offline_player_data`): the item compound with its `Slot`
+    /// (0-35 main, 100-103 armour feet to head, -106 off hand; the ender chest 0-26) replaces the one there.
+    fn write_offline_slot(&mut self, uuid: u128, kind: Kind, slot: usize, new: Option<ItemStack>) -> Result<(), String> {
+        let (key, saved): (&str, i8) = match kind {
+            Kind::Inventory => (
+                "Inventory",
+                match slot {
+                    0..=35 => slot as i8,
+                    36..=39 => (100 + slot - 36) as i8,
+                    40 => -106,
+                    _ => return Err(format!("no slot {slot}")),
+                },
+            ),
+            Kind::Ender if slot < 27 => ("EnderItems", slot as i8),
+            Kind::Ender => return Err(format!("no slot {slot}")),
+        };
+        let data = self.host.offline_player_data(uuid).ok_or("no saved player")?;
+        let entry = match &new {
+            Some(stack) => {
+                let mut c = stack.to_nbt(&*self.host).ok_or("the stack cannot be saved")?;
+                c.insert("Slot".into(), Tag::Byte(saved));
+                Some(Tag::Compound(c))
+            }
+            None => None,
+        };
+        let mut out = Compound::new();
+        let mut written = false;
+        for (k, v) in &data {
+            if k.to_string_lossy() == key {
+                if let Tag::List(items) = v {
+                    let mut list: Vec<Tag> = items.iter().filter(|t| saved_slot(t) != Some(saved)).cloned().collect();
+                    list.extend(entry.clone());
+                    out.insert(k.clone(), Tag::List(list));
+                    written = true;
+                    continue;
+                }
+            }
+            out.insert(k.clone(), v.clone());
+        }
+        if !written {
+            if let Some(e) = entry {
+                out.insert(key.into(), Tag::List(vec![e]));
+            }
+        }
+        self.host.set_offline_player_data(uuid, out).map_err(|e| format!("{e:?}"))
+    }
+}
+
 impl inv::Host for GameHost<'_> {
     type Stack = ItemStack;
 
@@ -197,14 +285,24 @@ impl inv::Host for GameHost<'_> {
             .collect()
     }
 
-    fn inventory(&self, uuid: u128, k: Kind) -> Result<inv::Inv<ItemStack>, inv::InvError> {
+    fn inventory(&mut self, uuid: u128, k: Kind) -> Result<inv::Inv<ItemStack>, inv::InvError> {
         let Some(player) = self.host.player(uuid) else {
-            // HMOD-GAP(server_player_inventory): engine main (7cb3ef30c3, after the pin) has `server_player_inventory`
-            // and `server_move_inventory_stack` for saved players, but both take `&mut host` while the core's
-            // `Host::inventory` is `&self`; wiring needs a core signature change plus the SDK pin to move.
-            return Err(inv::InvError::Other(
-                "offline inventories cannot be read on this server yet".into(),
-            ));
+            // A player who is not online: the game reads their save (`server_player_inventory`).
+            let kind = match k {
+                Kind::Inventory => PlayerInventoryKind::Player,
+                Kind::Ender => PlayerInventoryKind::Ender,
+            };
+            let snapshot = self
+                .host
+                .server_player_inventory(uuid, kind)
+                .map_err(|e| inv::InvError::from_horizon(&offline_error(&e)))?;
+            let mut slots = vec![None; k.size()];
+            for (i, stack) in snapshot.slots.into_iter().enumerate() {
+                if let Some(s) = slots.get_mut(i) {
+                    *s = stack;
+                }
+            }
+            return Ok(inv::Inv { slots, online: false });
         };
         // Vanilla's slot numbers (0-35 main, 36-39 armour, 40 off hand; ender chest 0-26), as the core counts.
         let read = match k {
@@ -240,7 +338,9 @@ impl inv::Host for GameHost<'_> {
         if current.as_ref() != expected {
             return Err("the slot changed".into());
         }
-        let player = self.host.player(uuid).ok_or("the player left")?;
+        let Some(player) = self.host.player(uuid) else {
+            return self.write_offline_slot(uuid, kind, slot, new).map(|()| current);
+        };
         let written = match kind {
             Kind::Inventory => player.set_inventory_slot(&mut *self.host, slot as u32, new),
             Kind::Ender => player.set_ender_chest_slot(&mut *self.host, slot as u32, new),
@@ -259,6 +359,15 @@ impl inv::Host for GameHost<'_> {
         expected: &ItemStack,
         to: (u128, Kind),
     ) -> Result<(), String> {
+        if self.host.player(from.0).is_none() || self.host.player(to.0).is_none() {
+            // A saved player's file is changed by the game, whole stack or nothing.
+            let kind = |k: Kind| match k {
+                Kind::Inventory => PlayerInventoryKind::Player,
+                Kind::Ender => PlayerInventoryKind::Ender,
+            };
+            let request = PlayerInventoryMove::new((from.0, kind(from.1), from.2 as u32), expected.clone(), (to.0, kind(to.1)));
+            return self.host.server_move_inventory_stack(&request).map_err(|e| offline_error(&e));
+        }
         let target = self.inventory(to.0, to.1).map_err(|e| format!("{e:?}"))?;
         let room = match to.1 {
             Kind::Inventory => 36,
@@ -306,6 +415,13 @@ impl inv::Host for GameHost<'_> {
     fn profile_by_name(&self, name: &str) -> Option<(u128, String)> {
         let player = self.host.players().player_by_name(name)?;
         Some((player.uuid(), player.name(&*self.host)?))
+    }
+
+    /// The `player data save files` strategy: the last known name in the player's saved file.
+    fn save_file_lookup(&mut self, q: &inv::Query) -> Option<(u128, String)> {
+        let inv::Query::Uuid(uuid) = q else { return None };
+        let data = self.host.offline_player_data(*uuid)?;
+        last_known_name(&data).map(|name| (*uuid, name))
     }
 
     fn profile_by_uuid(&self, uuid: u128) -> Option<String> {
@@ -415,13 +531,9 @@ impl inv::Host for GameHost<'_> {
     }
 
     fn log(&mut self, line: &str) {
-        // TODO(arismoko-api: server_log): stderr only unless built with `next-engine` (`console_log`, engine main after the pin).
-        #[cfg(feature = "next-engine")]
         for l in line.lines() {
             let _ = self.host.messages().console_log(ID, mod_api::ConsoleLevel::Info, l);
         }
-        #[cfg(not(feature = "next-engine"))]
-        eprint_line(line);
     }
 
     fn placeholder(&self, item: &str, name: &str) -> ItemStack {
@@ -526,33 +638,67 @@ fn bool_node(name: &str) -> PermissionNode {
     PermissionNode::new(name, PermissionValueType::Boolean)
 }
 
-/// The permission nodes the core asks, with the operator level that grants each by default. The view, edit,
-/// reload and tab-complete levels are the `[access]` levels of `config/invsee-server.toml` at start (the shipped
-/// defaults without the file; changing them needs a restart). `bypass-exempt` and `exempt` default to "nobody" in
-/// InvSee++, which a Boolean node cannot express: they are declared at level 4 so a permission mod can grant them
-/// (HMOD-GAP(bypass_exempt): level-4 operators hold them by default).
-fn permission_nodes() -> Vec<(&'static str, i32)> {
+/// One declared node: its default (`None` is plugin.yml's `default: false`, nobody, operators included) and the
+/// nodes holding it grants (plugin.yml `children`).
+struct Declared {
+    name: &'static str,
+    level: Option<i32>,
+    children: &'static [&'static str],
+}
+
+/// The permission nodes of plugin.yml. The view, edit, reload and tab-complete levels are the `[access]` levels of
+/// `config/invsee-server.toml` at start (the shipped defaults without the file; changing them needs a restart).
+fn permission_nodes() -> Vec<Declared> {
     let access = std::fs::read_to_string(Path::new("config").join("invsee-server.toml"))
         .ok()
         .and_then(|t| inv::config::Config::parse(&t).ok())
         .map(|c| c.access)
         .unwrap_or_default();
+    let node = |name, level: Option<i32>, children| Declared { name, level, children };
     vec![
-        ("invseeplusplus.invsee.view", access.invsee_view as i32),
-        ("invseeplusplus.invsee.edit", access.invsee_edit as i32),
-        ("invseeplusplus.endersee.view", access.endersee_view as i32),
-        ("invseeplusplus.endersee.edit", access.endersee_edit as i32),
-        ("invseeplusplus.reload", access.reload as i32),
-        ("invseeplusplus.tabcomplete", access.invsee_view.min(access.endersee_view) as i32),
-        ("invseeplusplus.bypass-exempt.invsee", 4),
-        ("invseeplusplus.bypass-exempt.endersee", 4),
-        ("invseeplusplus.exempt.invsee", 4),
-        ("invseeplusplus.exempt.endersee", 4),
-        // The aggregate nodes of plugin.yml: holding one grants its children (see `granting`).
-        ("invseeplusplus.view", access.invsee_view.min(access.endersee_view) as i32),
-        ("invseeplusplus.edit", access.invsee_edit.min(access.endersee_edit) as i32),
-        ("invseeplusplus.exempt", 4),
-        ("invseeplusplus.bypass-exempt", 4),
+        node(
+            "invseeplusplus.*",
+            None,
+            &[
+                "invseeplusplus.invsee.edit",
+                "invseeplusplus.endersee.edit",
+                "invseeplusplus.exempt.invsee",
+                "invseeplusplus.exempt.endersee",
+                "invseeplusplus.bypass-exempt.invsee",
+                "invseeplusplus.bypass-exempt.endersee",
+                "invseeplusplus.tabcomplete",
+                "invseeplusplus.reload",
+                "invseeplusplus.give.*",
+                "invseeplusplus.clear.*",
+                "invseeplusplus.clone.*",
+            ],
+        ),
+        node(
+            "invseeplusplus.view",
+            Some(access.invsee_view.min(access.endersee_view) as i32),
+            &["invseeplusplus.invsee.view", "invseeplusplus.endersee.view"],
+        ),
+        node(
+            "invseeplusplus.edit",
+            Some(access.invsee_edit.min(access.endersee_edit) as i32),
+            &["invseeplusplus.invsee.edit", "invseeplusplus.endersee.edit"],
+        ),
+        node("invseeplusplus.exempt", None, &["invseeplusplus.exempt.invsee", "invseeplusplus.exempt.endersee"]),
+        node(
+            "invseeplusplus.bypass-exempt",
+            None,
+            &["invseeplusplus.bypass-exempt.invsee", "invseeplusplus.bypass-exempt.endersee"],
+        ),
+        node("invseeplusplus.invsee.view", Some(access.invsee_view as i32), &["invseeplusplus.tabcomplete"]),
+        node("invseeplusplus.invsee.edit", Some(access.invsee_edit as i32), &["invseeplusplus.invsee.view"]),
+        node("invseeplusplus.endersee.view", Some(access.endersee_view as i32), &["invseeplusplus.tabcomplete"]),
+        node("invseeplusplus.endersee.edit", Some(access.endersee_edit as i32), &["invseeplusplus.endersee.view"]),
+        node("invseeplusplus.tabcomplete", Some(access.invsee_view.min(access.endersee_view) as i32), &[]),
+        node("invseeplusplus.reload", Some(access.reload as i32), &[]),
+        node("invseeplusplus.exempt.invsee", None, &[]),
+        node("invseeplusplus.exempt.endersee", None, &[]),
+        node("invseeplusplus.bypass-exempt.invsee", None, &[]),
+        node("invseeplusplus.bypass-exempt.endersee", None, &[]),
     ]
 }
 
@@ -660,8 +806,13 @@ impl Hooks for Mod {
     }
 
     fn permission_gather_nodes(&self, event: &mut PermissionGatherNodesEvent<'_>) {
-        for (node, level) in permission_nodes() {
-            let _ = event.nodes.add(bool_node(node), NodeDefault::Level(PermissionLevel::from_level(level)));
+        for d in permission_nodes() {
+            let default = match d.level {
+                Some(level) => NodeDefault::Level(PermissionLevel::from_level(level)),
+                None => NodeDefault::Nobody,
+            };
+            let children: Vec<PermissionNode> = d.children.iter().map(|c| bool_node(c)).collect();
+            let _ = event.nodes.add_with_children(bool_node(d.name), default, &children);
         }
     }
 

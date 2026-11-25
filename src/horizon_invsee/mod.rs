@@ -132,7 +132,7 @@ pub trait Host {
     /// The players on the server.
     fn players(&self) -> Vec<Online>;
     /// `uuid`'s inventory `kind` (`native_inventory`).
-    fn inventory(&self, uuid: u128, kind: Kind) -> Result<Inv<Self::Stack>, InvError>;
+    fn inventory(&mut self, uuid: u128, kind: Kind) -> Result<Inv<Self::Stack>, InvError>;
     /// One whole stack moved, checked against `expected` (`native_move_stack`).
     fn move_stack(
         &mut self,

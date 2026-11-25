@@ -116,3 +116,5 @@ Listeners and behaviour
 - [x] Live/file switch on join and leave (player join hooks)
 - [~] Viewers without edit rights see a copy (the original shows the live inventory; the target's live menu is API-blocked)
 - [x] Exemption by config list or by the target's `invseeplusplus.exempt.*` node
+
+Round 2 (combined SDK, 2026-11-25): feature `next-engine` removed. `Host::inventory` is `&mut self` now so an offline target is read with `server_player_inventory`; moves with an offline side use `server_move_inventory_stack`; single-slot edits of a saved player rewrite `Inventory`/`EnderItems` through `offline_player_data`/`set_offline_player_data`. Log lines use `console_log`. Permission nodes declared with `NodeDefault::Nobody` (exempt, bypass-exempt, `invseeplusplus.*`) and `add_with_children` (plugin.yml children). The `player data` resolver reads `bukkit.lastKnownName`.

@@ -86,19 +86,11 @@ horizon-launcher native-build <path to this folder> --server-output <dir> --vers
 
 ## Known gaps
 
-What does not work yet on arismoko/horizon (each is marked `TODO(arismoko-api: ...)` in `src/lib.rs`):
+Round 2 (2026-11-25): offline inventories and ender chests are read and written through the game's saved-player API, the log goes to the server console, `invseeplusplus.*` and the nobody-default nodes are declared. Still open:
 
-- Offline players' inventories cannot be read or written (a mod cannot read the player file yet).
-- The view follows the target every tick and clicks use vanilla's rules (cursor, drag, shift click, number keys,
-  double click), but it is the mod's own menu, not the target's container: throws and middle clicks do nothing, and
-  the target's cursor and crafting grid are shown, not edited.
+- The view follows the target every tick and clicks use vanilla's rules (cursor, drag, shift click, number keys, double click), but it is the mod's own menu, not the target's container (engine: `menu_view_player_container`): throws and middle clicks do nothing, and the target's cursor and crafting grid are shown, not edited.
 - The target's anvil, merchant and other workstation inputs cannot be read (only their placeholders are shown).
-- The `permission plugin` and `proxy` resolve strategies answer nothing. `player data` answers from `usercache.json`
-  (the last known names of players who were on), not from the save files.
-- Log lines (the server log and console outputs, and the reasons of failed reads) go to stderr, not to the server's log file.
-- The `invseeplusplus.*` wildcard cannot be checked (typed nodes have no wildcard name); a permission mod answering it is not seen.
-- A never-played player's view refuses clicks with its own text (`... nothing can be stored yet`): InvSee++ stores
-  there, which needs the offline write API.
+- The `permission plugin` resolve strategy answers nothing (GroupManager, BungeePerms and UltraPermissions are not installed); the `proxy` strategy (BungeeCord channel) is not wired. `player data` answers from the saved file's last known name for a UUID and from `usercache.json` for a name.
 
 ## Licence
 
