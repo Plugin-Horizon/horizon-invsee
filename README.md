@@ -2,7 +2,7 @@
 
 ## Port status
 
-Compared with InvSee++ (master, 722def9): **35/39 items** of the item list in `audit/rec100/invsee.md` work (round 8); the 4 open items need an engine API, a player file creator or another mod's port. The Give, Clear and Clone addons (`/invgive`, `/endergive`, `/invclear`, `/enderclear`, `/invclone`, `/enderclone`) are part of the mod; the spectator inventory events are service callbacks: call the service `invsee:api` with `subscribe <your mod id>`, and your `<id>:invsee_event` service gets `spectator_inventory_save` / `spectator_inventory_offline_created` lines (reply `cancel` to the save event to stop it).
+Compared with InvSee++ (master, 722def9): **36/39 items** of the item list in `audit/rec100/invsee.md` work (round 8); the 4 open items need an engine API, a player file creator or another mod's port. The Give, Clear and Clone addons (`/invgive`, `/endergive`, `/invclear`, `/enderclear`, `/invclone`, `/enderclone`) are part of the mod; the spectator inventory events are service callbacks: call the service `invsee:api` with `subscribe <your mod id>`, and your `<id>:invsee_event` service gets `spectator_inventory_save` / `spectator_inventory_offline_created` lines (reply `cancel` to the save event to stop it).
 
 > **Unofficial Rust port of InvSee++ for the Horizon server (https://github.com/arismoko/horizon). Not affiliated with or endorsed by the InvSee++ authors.**
 

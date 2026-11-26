@@ -457,6 +457,10 @@ impl<S: Clone + PartialEq> InvSee<S> {
         if !snap.online && host.event(&event_line("spectator_inventory_save", viewer, uuid, name, kind)) {
             return Ok(());
         }
+        // A player who never played has no file yet: InvSee++ creates it before it writes.
+        if !snap.online && matches!(host.inventory(uuid, kind), Err(InvError::NeverPlayed)) {
+            host.create_player_file(uuid, name)?;
+        }
         let atomic = host.begin();
         let mut result = Ok(());
         for (i, (old, new)) in snap.slots.iter().zip(after.iter()).enumerate() {

@@ -462,7 +462,11 @@ impl inv::Host for GameHost<'_> {
     }
 
     /// The `player data save files` strategy: the last known name in the player's saved file.
-    fn save_file_lookup(&mut self, q: &inv::Query) -> Option<(u128, String)> {
+    fn create_player_file(&mut self, uuid: u128, name: &str) -> Result<(), String> {
+        self.host.create_offline_player_data(uuid, name).map_err(|e| format!("{e:?}"))
+    }
+
+(&mut self, q: &inv::Query) -> Option<(u128, String)> {
         let inv::Query::Uuid(uuid) = q else { return None };
         let data = self.host.offline_player_data(*uuid)?;
         last_known_name(&data).map(|name| (*uuid, name))

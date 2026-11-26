@@ -257,6 +257,11 @@ pub trait Host {
     fn permission_lookup(&mut self, _q: &Query) -> Option<(u128, String)> {
         None
     }
+    /// Writes a fresh player file for a UUID that never joined (`create_offline_player_data`), so the slot writes have
+    /// a file to edit. Err with the reason when the game refuses.
+    fn create_player_file(&mut self, _uuid: u128, _name: &str) -> Result<(), String> {
+        Err("the game cannot create a player file".into())
+    }
     /// Asks the proxy (BungeeCord's `UUIDOther`) for the UUID of `name`, carried by any online player. False when there
     /// is no proxy or nobody to carry the message.
     fn proxy_ask(&mut self, _name: &str) -> bool {

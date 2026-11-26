@@ -50,6 +50,8 @@ struct Fake {
     block_tags: HashMap<String, Vec<String>>,
     /// A proxy that can be asked (`proxy_ask`), the names asked and the UUIDs it answered with.
     proxy: bool,
+    /// Player files the mod created.
+    created: Vec<u128>,
     proxy_asked: Vec<String>,
     proxy_replies: HashMap<String, u128>,
     /// The events other mods were told, and whether one of them cancels the save event.
@@ -289,6 +291,13 @@ impl Host for Fake {
     }
     fn block_tag_items(&self, tag: &str) -> Vec<String> {
         self.block_tags.get(tag).cloned().unwrap_or_default()
+    }
+    fn create_player_file(&mut self, uuid: u128, _name: &str) -> Result<(), String> {
+        self.created.push(uuid);
+        self.known.insert(uuid);
+        self.invs.insert((uuid, Kind::Inventory), vec![None; 41]);
+        self.invs.insert((uuid, Kind::Ender), vec![None; 27]);
+        Ok(())
     }
     fn proxy_ask(&mut self, name: &str) -> bool {
         if self.proxy {
@@ -1177,4 +1186,17 @@ fn addon_tab_completion_offers_names_items_and_amounts() {
     assert_eq!(items, vec!["diamond".to_string(), "diamond_sword".to_string()]);
     let (_, amounts) = m.tab_complete(&mut f, ADMIN, "/invgive Bob diamond 6").unwrap();
     assert!(amounts.contains(&"64".to_string()) && !amounts.contains(&"7".to_string()));
+}
+
+#[test]
+fn give_to_a_player_who_never_played_creates_the_file_first() {
+    let mut m = InvSee::<St>::new().with_lookup(mojang_knows_dave);
+    let mut f = Fake::new();
+    m.tick(&mut f);
+    run(&mut m, &mut f, ADMIN, "Admin", "invgive dave diamond 3");
+    m.tick(&mut f);
+    assert_eq!(f.created.len(), 1, "{:?}", f.told);
+    let dave = f.created[0];
+    assert_eq!(f.get(dave, Kind::Inventory, 0), Some(st("diamond", 3)));
+    assert!(f.told(ADMIN).iter().any(|l| l.contains("Added")), "{:?}", f.told);
 }
