@@ -5,6 +5,7 @@
 //! read again when it changes).
 
 pub mod horizon_invsee;
+mod cmdkit;
 pub mod snbt;
 use crate::horizon_invsee::{self as inv, Kind};
 use mod_api::{
@@ -865,8 +866,8 @@ fn console_try(host: &mut dyn ServerHost, line: &str) -> Option<Option<Vec<Strin
 fn command_line(command: &CommandInvocation) -> String {
     let mut words = command.literals.clone();
     for argument in &command.arguments {
-        if let CommandArgumentValue::String(word) = &argument.value {
-            words.push(word.clone());
+        if let Some(word) = cmdkit::value_text(&argument.value) {
+            words.push(word);
         }
     }
     words.join(" ")
@@ -927,10 +928,14 @@ impl Hooks for Mod {
         }
     }
 
+    fn register(&self, registrar: &mut dyn mod_api::Registrar, _: &mod_api::RegistrationContext) {
+        cmdkit::register(registrar);
+    }
+
     fn register_node_commands(&self, _: &mut dyn ServerHost, event: &mut RegisterNodeCommandsEvent<'_>) {
         for (usage, level) in usages() {
             // The core writes `word?` so the client asks for names; arismoko's word is plain `word`.
-            let usage = usage.replace("word?", "word");
+            let usage = cmdkit::ask(&usage.replace("word?", "word"), ID);
             // The plugin.yml node of the word: a permissions mod's answer decides who sees the usage, the level
             // only when none answers (as Bukkit's `permission:`). Others get Bukkit's text from `player_command`.
             let word = usage.split_whitespace().next().unwrap_or_default();
@@ -1154,6 +1159,18 @@ fn view_request(kind: Kind) -> ViewRequest {
     match kind {
         Kind::Inventory => ViewRequest::Extras(PlayerViewExtras::CursorAndCrafting),
         Kind::Ender => ViewRequest::Plain(PlayerViewKind::EnderChest),
+    }
+}
+
+#[cfg(test)]
+mod tree_tests {
+    use super::*;
+
+    #[test]
+    fn the_commands_of_the_plugin_yml_ask_the_server_for_names() {
+        let asked = cmdkit::ask(&"invsee [target:word?]".replace("word?", "word"), ID);
+        assert_eq!(asked, "invsee [target:invsee:word]");
+        assert_eq!(cmdkit::ask("invgive <target:word> <args:text>", ID), "invgive <target:invsee:word> <args:invsee:text>");
     }
 }
 
