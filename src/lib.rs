@@ -477,7 +477,7 @@ impl inv::Host for GameHost<'_> {
             return false;
         }
         let Some(carrier) = self.host.players().server_players().into_iter().next() else { return false };
-        self.host.player_send_plugin_message(carrier, &channel, &inv::proxy::request(name)).is_ok()
+        send_plugin_message(&mut *self.host, carrier, &channel, &inv::proxy::request(name))
     }
 
     fn proxy_answer(&mut self, name: &str) -> Option<u128> {
@@ -1162,4 +1162,9 @@ mod glue_tests {
         assert_eq!(view_request(Kind::Inventory), ViewRequest::Extras(PlayerViewExtras::CursorAndCrafting));
         assert_eq!(view_request(Kind::Ender), ViewRequest::Plain(PlayerViewKind::EnderChest));
     }
+}
+
+/// The one place that sends a plugin message (`PlayerRef::send_plugin_message` once the engine exposes it to servers).
+fn send_plugin_message(host: &mut dyn ServerHost, carrier: mod_api::PlayerRef, channel: &Identifier, data: &[u8]) -> bool {
+    carrier.send_plugin_message(host, channel, data).is_ok()
 }
