@@ -374,6 +374,7 @@ impl<S: Clone + PartialEq> InvSee<S> {
             typed,
             step: 0,
             lookup: None,
+            proxy_since: None,
             op,
         });
         Some(Vec::new())
@@ -492,6 +493,7 @@ impl<S: Clone + PartialEq> InvSee<S> {
                         typed: t,
                         step: 0,
                         lookup: None,
+                        proxy_since: None,
                         op: Op::CloneTo { source },
                     }),
                     None => {

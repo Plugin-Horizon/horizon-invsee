@@ -477,7 +477,7 @@ impl inv::Host for GameHost<'_> {
             return false;
         }
         let Some(carrier) = self.host.players().server_players().into_iter().next() else { return false };
-        carrier.send_plugin_message(&mut *self.host, &channel, &inv::proxy::request(name)).is_ok()
+        self.host.player_send_plugin_message(carrier, &channel, &inv::proxy::request(name)).is_ok()
     }
 
     fn proxy_answer(&mut self, name: &str) -> Option<u128> {
@@ -703,7 +703,7 @@ impl inv::Host for GameHost<'_> {
         let items = self.item_ids();
         blocks
             .into_iter()
-            .map(|b| self.host.block_key_id(b))
+            .map(|b| b.id(&*self.host))
             .filter(|id| items.contains(id))
             .collect()
     }
