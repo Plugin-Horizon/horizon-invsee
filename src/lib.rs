@@ -11,7 +11,7 @@ use mod_api::{
     Command, CommandArgumentValue, CommandInvocation, CommandSource, Compound, Config, ConfigKind,
     ConfigLoadingEvent, ConfigReloadingEvent, Flow, HostSide, HostTransaction, Hooks, Identifier, ItemPlace,
     ItemResource, ItemStack, PlayerContainerCloseEvent, PlayerContainerOpenEvent, TransactionSeal,
-    MenuClickedEvent, MenuClosedEvent, MenuReplace, PlayerViewKind, NodeDefault, PermissionGatherNodesEvent,
+    MenuClickedEvent, MenuClosedEvent, MenuReplace, PlayerViewExtras, PlayerViewKind, NodeDefault, PermissionGatherNodesEvent,
     PermissionLevel, PermissionNode, PermissionValueType, PlayerCommandEvent, PlayerLoggedInEvent,
     PlayerLoggedOutEvent, RegisterNodeCommandsEvent, RegisterConfigsEvent, RunModCommandEvent,
     ModServiceCallEvent, ModServiceError, PayloadBytes,
@@ -429,15 +429,21 @@ impl inv::Host for GameHost<'_> {
         if viewer == target.0 {
             return None;
         }
-        let kind = match target.1 {
-            Kind::Inventory => PlayerViewKind::Inventory,
-            Kind::Ender => PlayerViewKind::EnderChest,
-        };
         let title = text(&*self.host, title);
-        self.host
-            .open_player_view(viewer, target.0, kind, title, MenuReplace::CloseFirst)
-            .ok()
-            .flatten()
+        match view_request(target.1) {
+            // The inventory view is the six-row chest with the target's cursor at 45, their crafting grid at 46 to 49
+            // and its result at 50 (`SpectatorInventory`).
+            ViewRequest::Extras(extras) => self
+                .host
+                .open_player_view_extras(viewer, target.0, extras, title, MenuReplace::CloseFirst)
+                .ok()
+                .flatten(),
+            ViewRequest::Plain(kind) => self
+                .host
+                .open_player_view(viewer, target.0, kind, title, MenuReplace::CloseFirst)
+                .ok()
+                .flatten(),
+        }
     }
 
     fn with_count(&self, stack: &ItemStack, count: u32) -> Option<ItemStack> {
@@ -667,6 +673,21 @@ impl inv::Host for GameHost<'_> {
         let Some(key) = tags.key(&id) else { return Vec::new() };
         let Some(items) = tags.items(key) else { return Vec::new() };
         items.into_iter().map(|k| k.id(&*self.host)).collect()
+    }
+
+    /// `Tag.REGISTRY_BLOCKS`: the blocks of a block tag, as the items that carry their id (a block without an item,
+    /// water or a wall banner, has nothing to clear).
+    fn block_tag_items(&self, tag: &str) -> Vec<String> {
+        let Ok(id) = Identifier::parse(tag) else { return Vec::new() };
+        let tags = self.host.tags();
+        let Some(key) = tags.key(&id) else { return Vec::new() };
+        let Some(blocks) = tags.blocks(key) else { return Vec::new() };
+        let items = self.item_ids();
+        blocks
+            .into_iter()
+            .map(|b| self.host.block_key_id(b))
+            .filter(|id| items.contains(id))
+            .collect()
     }
 
     /// The spectator inventory events, as service calls to the mods that subscribed. A reply of `cancel` cancels the
@@ -1087,5 +1108,30 @@ impl Hooks for Mod {
     fn server_stopping(&self, host: &mut dyn ServerHost, _: &mut ServerStoppingEvent) {
         let mut game = GameHost::new(host);
         with(|m| m.stopping(&mut game));
+    }
+}
+
+/// Which game view a spectator's inventory kind opens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ViewRequest {
+    Plain(PlayerViewKind),
+    Extras(PlayerViewExtras),
+}
+
+fn view_request(kind: Kind) -> ViewRequest {
+    match kind {
+        Kind::Inventory => ViewRequest::Extras(PlayerViewExtras::CursorAndCrafting),
+        Kind::Ender => ViewRequest::Plain(PlayerViewKind::EnderChest),
+    }
+}
+
+#[cfg(test)]
+mod glue_tests {
+    use super::*;
+
+    #[test]
+    fn the_inventory_view_shows_cursor_and_crafting_and_the_ender_chest_stays_plain() {
+        assert_eq!(view_request(Kind::Inventory), ViewRequest::Extras(PlayerViewExtras::CursorAndCrafting));
+        assert_eq!(view_request(Kind::Ender), ViewRequest::Plain(PlayerViewKind::EnderChest));
     }
 }

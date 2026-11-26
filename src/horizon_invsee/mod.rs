@@ -273,6 +273,11 @@ pub trait Host {
     fn tag_items(&self, _tag: &str) -> Vec<String> {
         Vec::new()
     }
+    /// The item ids of the blocks in the block tag `tag` (`minecraft:logs` as `Tag.REGISTRY_BLOCKS` has it): the
+    /// members that have an item; empty for a tag nobody knows. `/invclear` asks it when no item tag has the name.
+    fn block_tag_items(&self, _tag: &str) -> Vec<String> {
+        Vec::new()
+    }
     /// An event for other mods (`SpectatorInventorySaveEvent` and `SpectatorInventoryOfflineCreatedEvent` as service
     /// callbacks): `line` is `<name>\t<spectator>\t<target>\t<target name>\t<inventory|enderchest>`. True when a
     /// listener cancelled it (only the save event can be).

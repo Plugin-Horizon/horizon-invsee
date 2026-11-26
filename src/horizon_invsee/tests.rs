@@ -46,6 +46,8 @@ struct Fake {
     grids: HashMap<u128, Vec<Option<St>>>,
     /// Item tags by name.
     tags: HashMap<String, Vec<String>>,
+    /// Block tags by name, as the item ids of their members.
+    block_tags: HashMap<String, Vec<String>>,
     /// The events other mods were told, and whether one of them cancels the save event.
     events: Vec<String>,
     cancel_save: bool,
@@ -280,6 +282,9 @@ impl Host for Fake {
     }
     fn tag_items(&self, tag: &str) -> Vec<String> {
         self.tags.get(tag).cloned().unwrap_or_default()
+    }
+    fn block_tag_items(&self, tag: &str) -> Vec<String> {
+        self.block_tags.get(tag).cloned().unwrap_or_default()
     }
     fn event(&mut self, line: &str) -> bool {
         self.events.push(line.replace('\t', "|"));
@@ -1031,6 +1036,26 @@ fn clear_removes_all_an_item_at_most_n_or_a_tag() {
     assert_eq!(f.told(ADMIN)[2], "§aCleared Bob's inventory.");
     assert!(f.invs[&(BOB, Kind::Inventory)].iter().all(Option::is_none));
     assert_eq!(run(&mut m, &mut f, ADMIN, "Admin", "enderclear Bob nothing"), vec!["§cMaterial nothing does not exist."]);
+}
+
+#[test]
+fn clear_takes_a_block_tag_when_no_item_tag_has_the_name() {
+    let (mut m, mut f) = setup();
+    f.block_tags.insert("minecraft:flowers".into(), vec!["minecraft:oak_log".into(), "minecraft:bread".into()]);
+    for (slot, s) in [(0, st("oak_log", 4)), (1, st("stone", 5)), (2, st("bread", 2))] {
+        f.set(BOB, Kind::Inventory, slot, Some(s));
+    }
+    run(&mut m, &mut f, ADMIN, "Admin", "invclear Bob flowers");
+    assert_eq!(f.told(ADMIN), vec!["§aRemoved all minecraft:flowers from Bob's inventory."]);
+    assert_eq!(f.get(BOB, Kind::Inventory, 0), None);
+    assert_eq!(f.get(BOB, Kind::Inventory, 2), None);
+    assert_eq!(f.get(BOB, Kind::Inventory, 1), Some(st("stone", 5)));
+    // An item tag of the same name wins, as the original looks the item registry up first.
+    f.tags.insert("minecraft:flowers".into(), vec!["minecraft:stone".into()]);
+    f.set(BOB, Kind::Inventory, 0, Some(st("oak_log", 1)));
+    run(&mut m, &mut f, ADMIN, "Admin", "invclear Bob flowers");
+    assert_eq!(f.get(BOB, Kind::Inventory, 1), None);
+    assert_eq!(f.get(BOB, Kind::Inventory, 0), Some(st("oak_log", 1)));
 }
 
 #[test]

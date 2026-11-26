@@ -337,7 +337,10 @@ impl<S: Clone + PartialEq> InvSee<S> {
                         ids.push(id);
                     } else {
                         let key = if input.contains(':') { input.to_lowercase() } else { format!("minecraft:{}", input.to_lowercase()) };
-                        let members = host.tag_items(&key);
+                        let mut members = host.tag_items(&key);
+                        if members.is_empty() {
+                            members = host.block_tag_items(&key);
+                        }
                         if members.is_empty() {
                             return Some(vec![format!("§cMaterial {input} does not exist.")]);
                         }

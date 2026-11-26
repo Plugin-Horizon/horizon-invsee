@@ -2,7 +2,7 @@
 
 ## Port status
 
-Compared with InvSee++ (master, 722def9): **32/37 items** of the item list in `audit/rec100/invsee.md` work (round 6); the 5 open items are engine-side. The Give, Clear and Clone addons (`/invgive`, `/endergive`, `/invclear`, `/enderclear`, `/invclone`, `/enderclone`) are part of the mod; the spectator inventory events are service callbacks: call the service `invsee:api` with `subscribe <your mod id>`, and your `<id>:invsee_event` service gets `spectator_inventory_save` / `spectator_inventory_offline_created` lines (reply `cancel` to the save event to stop it).
+Compared with InvSee++ (master, 722def9): **34/38 items** of the item list in `audit/rec100/invsee.md` work (round 8); the 4 open items need an engine API, a player file creator or another mod's port. The Give, Clear and Clone addons (`/invgive`, `/endergive`, `/invclear`, `/enderclear`, `/invclone`, `/enderclone`) are part of the mod; the spectator inventory events are service callbacks: call the service `invsee:api` with `subscribe <your mod id>`, and your `<id>:invsee_event` service gets `spectator_inventory_save` / `spectator_inventory_offline_created` lines (reply `cancel` to the save event to stop it).
 
 > **Unofficial Rust port of InvSee++ for the Horizon server (https://github.com/arismoko/horizon). Not affiliated with or endorsed by the InvSee++ authors.**
 
@@ -94,7 +94,7 @@ horizon-launcher native-build <path to this folder> --server-output <dir> --vers
 
 Round 2 (2026-11-25): offline inventories and ender chests are read and written through the game's saved-player API, the log goes to the server console, `invseeplusplus.*` and the nobody-default nodes are declared. Still open:
 
-- Round 3: a viewer with the edit node gets the game's live view of an online target (`open_player_view`: the slots are the target's own, throws and middle clicks work, armour and off hand take any stack). Its layout is the game's (five rows for an inventory), so the template's placeholders are not shown there, and the log of a live view is the difference of the target's slots at open and close. Viewers without the edit node, offline and never-played targets keep the mod's copy menu. The target's cursor and crafting grid are not part of the game's view.
+- Round 3: a viewer with the edit node gets the game's live view of an online target (`open_player_view`: the slots are the target's own, throws and middle clicks work, armour and off hand take any stack). Its layout is the game's (five rows for an inventory), so the template's placeholders are not shown there, and the log of a live view is the difference of the target's slots at open and close. Viewers without the edit node, offline and never-played targets keep the mod's copy menu. Round 8: the inventory view is `open_player_view_extras` (six rows: cursor at 45, crafting grid 46 to 49, its result at 50); the workstation inputs of a menu the target has open are still not part of it. `/invclear` takes a block tag too (the items that carry the block ids).
 - The target's anvil, merchant and other workstation inputs cannot be read (only their placeholders are shown).
 - The `permission plugin` resolve strategy answers nothing (GroupManager, BungeePerms and UltraPermissions are not installed); the `proxy` strategy (BungeeCord channel) is not wired. `player data` answers from the saved file's last known name for a UUID and from `usercache.json` for a name.
 
