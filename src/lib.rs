@@ -956,9 +956,9 @@ impl Hooks for Mod {
         }
     }
 
-    /// Bukkit's text for a player without the command's permission (plugin.yml `permission:`, red).
-    /// The usage is hidden from such a player (`register_commands`), so the typed command would read
-    /// "unknown command" without this.
+    /// A player without the command's permission: the usage is hidden from them (`register_node_commands`), so the typed
+    /// command reads "unknown command", as on Paper 26.3 (it shows no "I'm sorry" text either). The `++` reload words
+    /// are not registered (the engine refuses them), so a permitted player's line is answered here.
     fn player_command(&self, host: &mut dyn ServerHost, event: &mut PlayerCommandEvent<'_>) -> Flow {
         let root = event
             .command
@@ -968,36 +968,19 @@ impl Hooks for Mod {
             .unwrap_or_default()
             .to_lowercase();
         if PLUS_WORDS.contains(&root.as_str()) {
-            // Same node as `isppreload`; permitted players get the reload, others Bukkit's text.
             let uuid = event.player;
+            if !has(host, uuid, "invseeplusplus.reload") {
+                return Flow::Continue;
+            }
             let name = host.player(uuid).and_then(|p| p.name(&*host)).unwrap_or_default();
-            let allowed = has(host, uuid, "invseeplusplus.reload");
             event.cancelled = true;
-            if allowed {
-                for l in perform(host, uuid, &name, "invseeplusplusreload").unwrap_or_default() {
-                    let line = text(&*host, &l);
-                    event.replies.push(line);
-                }
-            } else {
-                event.replies.push(Text::literal(
-                    "\u{a7}cI'm sorry, but you do not have permission to perform this command. Please contact the server administrators if you believe that this is in error.",
-                ));
+            for l in perform(host, uuid, &name, "invseeplusplusreload").unwrap_or_default() {
+                let line = text(&*host, &l);
+                event.replies.push(line);
             }
             return Flow::Cancel;
         }
-        if !is_own(&root) {
-            return Flow::Continue;
-        }
-        let uuid = event.player;
-        let allowed = has(host, uuid, &node_of_word(&root));
-        if allowed {
-            return Flow::Continue;
-        }
-        event.cancelled = true;
-        event.replies.push(Text::literal(
-            "\u{a7}cI'm sorry, but you do not have permission to perform this command. Please contact the server administrators if you believe that this is in error.",
-        ));
-        Flow::Cancel
+        Flow::Continue
     }
 
     /// The service `invsee:api`: `subscribe <mod id>` / `unsubscribe <mod id>` for the spectator inventory events (the
