@@ -14,7 +14,7 @@ use mod_api::{
     MenuClickedEvent, MenuClosedEvent, MenuReplace, PlayerViewExtras, PlayerViewKind, NodeDefault, PermissionGatherNodesEvent,
     PermissionLevel, PermissionNode, PermissionValueType, PlayerCommandEvent, PlayerLoggedInEvent,
     PlayerLoggedOutEvent, RegisterNodeCommandsEvent, RegisterConfigsEvent, RunModCommandEvent,
-    ModServiceCallEvent, ModServiceError, PayloadBytes,
+    ModServiceCallEvent, ModServiceError, PayloadBytes, PluginMessageEvent,
     ServerHost, ServerStoppingEvent, ServerTickEvent, ServerTickPhase, Suggestion,
     TabCompleteEvent, Tag, Text, PlayerInventoryError, PlayerInventoryKind, PlayerInventoryMove,
 };
@@ -60,6 +60,8 @@ static DEFERRED: Mutex<Vec<Deferred>> = Mutex::new(Vec::new());
 /// The mods that called `invsee:api` `subscribe`: their `<id>:invsee_event` service gets the spectator inventory events.
 static SUBSCRIBERS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
+/// What the proxy answered (`UUIDOther`), by lower-case name, until the lookup takes it.
+static PROXY_ANSWERS: Mutex<BTreeMap<String, u128>> = Mutex::new(BTreeMap::new());
 static WINDOWS: Mutex<BTreeMap<u128, i32>> = Mutex::new(BTreeMap::new());
 
 enum Deferred {
@@ -464,6 +466,22 @@ impl inv::Host for GameHost<'_> {
         let inv::Query::Uuid(uuid) = q else { return None };
         let data = self.host.offline_player_data(*uuid)?;
         last_known_name(&data).map(|name| (*uuid, name))
+    }
+
+    /// The `proxy` strategy: BungeeCord's `UUIDOther` over the proxy channel, carried by any online player. A server
+    /// without a proxy (no `forwarding.secret`) has none to ask.
+    fn proxy_ask(&mut self, name: &str) -> bool {
+        let behind_proxy = self.server_dir().is_some_and(|d| d.join("forwarding.secret").is_file());
+        let Ok(channel) = Identifier::parse(inv::proxy::CHANNEL) else { return false };
+        if !behind_proxy || self.host.register_plugin_channel(&channel).is_err() {
+            return false;
+        }
+        let Some(carrier) = self.host.players().server_players().into_iter().next() else { return false };
+        carrier.send_plugin_message(&mut *self.host, &channel, &inv::proxy::request(name)).is_ok()
+    }
+
+    fn proxy_answer(&mut self, name: &str) -> Option<u128> {
+        PROXY_ANSWERS.lock().unwrap_or_else(|e| e.into_inner()).remove(&name.to_lowercase())
     }
 
     fn profile_by_uuid(&self, uuid: u128) -> Option<String> {
@@ -1063,6 +1081,16 @@ impl Hooks for Mod {
         if matches!(event.phase, ServerTickPhase::ServerTickEnd { .. }) {
             let mut game = GameHost::new(host);
             tick(&mut game);
+        }
+    }
+
+    /// The proxy's `UUIDOther` reply on the channel `proxy_ask` registered.
+    fn plugin_message(&self, _: &mut dyn ServerHost, event: &mut PluginMessageEvent<'_>) {
+        if event.channel.to_string() != inv::proxy::CHANNEL {
+            return;
+        }
+        if let Some((name, uuid)) = inv::proxy::parse_reply(event.data) {
+            PROXY_ANSWERS.lock().unwrap_or_else(|e| e.into_inner()).insert(name.to_lowercase(), uuid);
         }
     }
 

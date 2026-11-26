@@ -14,6 +14,7 @@ pub mod click;
 pub mod config;
 pub mod mojang;
 pub mod names;
+pub mod proxy;
 pub mod template;
 
 use config::{Config, Granularity, Palette, Resolver};
@@ -256,6 +257,15 @@ pub trait Host {
     fn permission_lookup(&mut self, _q: &Query) -> Option<(u128, String)> {
         None
     }
+    /// Asks the proxy (BungeeCord's `UUIDOther`) for the UUID of `name`, carried by any online player. False when there
+    /// is no proxy or nobody to carry the message.
+    fn proxy_ask(&mut self, _name: &str) -> bool {
+        false
+    }
+    /// The proxy's answer to `proxy_ask`, taken when it has come.
+    fn proxy_answer(&mut self, _name: &str) -> Option<u128> {
+        None
+    }
     /// The player file of `uuid` read for its last known name, or the player whose file has `name` (`player data
     /// save files` strategies).
     fn save_file_lookup(&mut self, _q: &Query) -> Option<(u128, String)> {
@@ -325,6 +335,8 @@ struct Pending {
     /// The resolver tried next.
     step: usize,
     lookup: Option<Lookup>,
+    /// The tick the proxy was asked at (`proxy` strategy).
+    proxy_since: Option<u64>,
     /// What to do with the target once found.
     op: addons::Op,
 }
@@ -781,6 +793,7 @@ impl<S: Clone + PartialEq> InvSee<S> {
             query,
             step: 0,
             lookup: None,
+            proxy_since: None,
             op: addons::Op::View,
         });
         Some(Vec::new())
@@ -980,8 +993,28 @@ impl<S: Clone + PartialEq> InvSee<S> {
                     Query::Name(n) => self.usercache().and_then(|d| d.uuid(n)),
                     Query::Uuid(u) => self.usercache().and_then(|d| d.name(*u)).map(|n| (*u, n)),
                 }),
-                // The proxy answers a UUID lookup over the plugin channel; the game has no way to ask it yet.
-                (_, Resolver::Proxy) => None,
+                // The proxy knows a name's UUID (BungeeCord `UUIDOther`); there is no message that names a UUID.
+                (Query::Uuid(_), Resolver::Proxy) => None,
+                (Query::Name(n), Resolver::Proxy) => match p.proxy_since {
+                    None => {
+                        if host.proxy_ask(n) {
+                            p.proxy_since = Some(self.tick);
+                            return Resolve::Wait;
+                        }
+                        None
+                    }
+                    Some(since) => match host.proxy_answer(n) {
+                        Some(uuid) => {
+                            p.proxy_since = None;
+                            Some((uuid, n.clone()))
+                        }
+                        None if self.tick.saturating_sub(since) < proxy::TIMEOUT_TICKS => return Resolve::Wait,
+                        None => {
+                            p.proxy_since = None;
+                            None
+                        }
+                    },
+                },
             };
             if let Some((uuid, name)) = found {
                 return Resolve::Found(uuid, name);

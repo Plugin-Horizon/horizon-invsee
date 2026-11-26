@@ -48,6 +48,10 @@ struct Fake {
     tags: HashMap<String, Vec<String>>,
     /// Block tags by name, as the item ids of their members.
     block_tags: HashMap<String, Vec<String>>,
+    /// A proxy that can be asked (`proxy_ask`), the names asked and the UUIDs it answered with.
+    proxy: bool,
+    proxy_asked: Vec<String>,
+    proxy_replies: HashMap<String, u128>,
     /// The events other mods were told, and whether one of them cancels the save event.
     events: Vec<String>,
     cancel_save: bool,
@@ -286,6 +290,15 @@ impl Host for Fake {
     fn block_tag_items(&self, tag: &str) -> Vec<String> {
         self.block_tags.get(tag).cloned().unwrap_or_default()
     }
+    fn proxy_ask(&mut self, name: &str) -> bool {
+        if self.proxy {
+            self.proxy_asked.push(name.to_owned());
+        }
+        self.proxy
+    }
+    fn proxy_answer(&mut self, name: &str) -> Option<u128> {
+        self.proxy_replies.remove(name)
+    }
     fn event(&mut self, line: &str) -> bool {
         self.events.push(line.replace('\t', "|"));
         self.cancel_save && line.starts_with("spectator_inventory_save")
@@ -490,6 +503,48 @@ fn unknown_names_are_asked_of_mojang_and_never_played_players_get_an_empty_view(
     m.perform(&mut f, ADMIN, "Admin", "invsee dave");
     m.tick(&mut f);
     assert!(f.told(ADMIN).iter().any(|l| l.contains("has not logged onto the server yet")), "{:?}", f.told);
+}
+
+#[test]
+fn the_proxy_answers_a_name_with_its_uuid_within_five_seconds() {
+    let mut m = InvSee::<St>::new().with_lookup(mojang_says_nothing);
+    let mut f = Fake::new();
+    f.proxy = true;
+    m.load_config("[players]\nuuid_resolve = [\"online\", \"proxy\", \"offline\"]\n", None);
+    m.tick(&mut f);
+    m.perform(&mut f, ADMIN, "Admin", "invsee Zed");
+    m.tick(&mut f);
+    assert_eq!(f.proxy_asked, vec!["Zed".to_string()]);
+    assert!(f.menus.is_empty(), "waits for the proxy");
+    m.tick(&mut f);
+    assert_eq!(f.proxy_asked.len(), 1, "asked once");
+    f.proxy_replies.insert("Zed".into(), 0xFEED);
+    m.tick(&mut f);
+    assert_eq!(f.menu(ADMIN).2, "Zed's inventory");
+}
+
+#[test]
+fn a_silent_proxy_is_given_up_after_100_ticks_and_no_proxy_is_skipped() {
+    let mut m = InvSee::<St>::new().with_lookup(mojang_says_nothing);
+    let mut f = Fake::new();
+    f.proxy = true;
+    m.load_config("[players]\nuuid_resolve = [\"online\", \"proxy\"]\n", None);
+    m.tick(&mut f);
+    m.perform(&mut f, ADMIN, "Admin", "invsee Zed");
+    for _ in 0..99 {
+        m.tick(&mut f);
+    }
+    assert!(f.told(ADMIN).is_empty(), "{:?}", f.told);
+    for _ in 0..3 {
+        m.tick(&mut f);
+    }
+    assert!(f.told(ADMIN).iter().any(|l| l.contains("does not exist")), "{:?}", f.told);
+    // No proxy (a standalone server): the strategy is passed over at once.
+    let mut f = Fake::new();
+    m.perform(&mut f, ADMIN, "Admin", "invsee Zed");
+    m.tick(&mut f);
+    assert!(f.proxy_asked.is_empty());
+    assert!(f.told(ADMIN).iter().any(|l| l.contains("does not exist")), "{:?}", f.told);
 }
 
 #[test]
