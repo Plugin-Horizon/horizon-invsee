@@ -1,6 +1,6 @@
 id = "invsee"
 name = "invsee"
-version = "1.001.0"
+version = "1.1.0"
 description = "/invsee and /endersee for Horizon: view a player's inventory, online or offline (port of InvSee++, LGPL-2.1)."
 authors = ["LionSpacer"]
 api = "0.2"
