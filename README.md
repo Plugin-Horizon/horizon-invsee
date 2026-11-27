@@ -2,7 +2,7 @@
 
 ## Port status
 
-Compared with InvSee++ (master, 722def9) (estimate): **82 %** of the original's commands, permissions, config keys, messages and features work today; **89 %** once our open Horizon PRs are merged; **91 %** with the engine changes we are writing; **82 %** with the newest Horizon SDK. Estimated count: 37/45 items. Status: not yet compiled after the 2026-11-20 round.
+Compared with InvSee++ (master, 722def9): **36/39 items** of the item list in `audit/rec100/invsee.md` work (round 8); the 4 open items need an engine API, a player file creator or another mod's port. The Give, Clear and Clone addons (`/invgive`, `/endergive`, `/invclear`, `/enderclear`, `/invclone`, `/enderclone`) are part of the mod; the spectator inventory events are service callbacks: call the service `invsee:api` with `subscribe <your mod id>`, and your `<id>:invsee_event` service gets `spectator_inventory_save` / `spectator_inventory_offline_created` lines (reply `cancel` to the save event to stop it).
 
 > **Unofficial Rust port of InvSee++ for the Horizon server (https://github.com/arismoko/horizon). Not affiliated with or endorsed by the InvSee++ authors.**
 
@@ -31,6 +31,12 @@ This is a native trait mod: `horizon-mod.toml`, a `Cargo.toml` that depends on `
 | `/invsee <name>\|<uuid>` | `inventorysee`, `isee` | 1 (any operator) |
 | `/endersee <name>\|<uuid>` | `enderchestsee`, `esee` | 1 (any operator) |
 | `/invseeplusplusreload` | `isppreload` | 1 (any operator; also from the console) |
+| `/invgive <player> <item>[components] [amount]` | `inventorygive`, `igive` | 1 (`give_inventory`; also from the console) |
+| `/endergive <player> <item>[components] [amount]` | `enderchestgive`, `egive` | 1 (`give_enderchest`) |
+| `/invclear <player> [item or #tag] [max]` | `inventoryclear`, `iclear` | 1 (`clear_inventory`) |
+| `/enderclear <player> [item or #tag] [max]` | `enderchestclear`, `eclear` | 1 (`clear_enderchest`) |
+| `/invclone <source> [target]` | `inventoryclone`, `iclone` | 1 (`clone_inventory`) |
+| `/enderclone <source> [target]` | `enderchestclone`, `eclone` | 1 (`clone_enderchest`) |
 
 A view opens on the next server tick. It follows the target live (every tick while they are online, every
 `offline_refresh_ticks` from their file while they are not). A player who joins or leaves while viewed is switched
@@ -86,19 +92,11 @@ horizon-launcher native-build <path to this folder> --server-output <dir> --vers
 
 ## Known gaps
 
-What does not work yet on arismoko/horizon (each is marked `TODO(arismoko-api: ...)` in `src/lib.rs`):
+Round 2 (2026-11-25): offline inventories and ender chests are read and written through the game's saved-player API, the log goes to the server console, `invseeplusplus.*` and the nobody-default nodes are declared. Still open:
 
-- Offline players' inventories cannot be read or written (a mod cannot read the player file yet).
-- The view follows the target every tick and clicks use vanilla's rules (cursor, drag, shift click, number keys,
-  double click), but it is the mod's own menu, not the target's container: throws and middle clicks do nothing, and
-  the target's cursor and crafting grid are shown, not edited.
+- Round 3: a viewer with the edit node gets the game's live view of an online target (`open_player_view`: the slots are the target's own, throws and middle clicks work, armour and off hand take any stack). Its layout is the game's (five rows for an inventory), so the template's placeholders are not shown there, and the log of a live view is the difference of the target's slots at open and close. Viewers without the edit node, offline and never-played targets keep the mod's copy menu. Round 8: the `proxy` resolve strategy asks BungeeCord's `UUIDOther` (a server behind Velocity or BungeeCord, `forwarding.secret` present); the inventory view is `open_player_view_extras` (six rows: cursor at 45, crafting grid 46 to 49, its result at 50); the workstation inputs of a menu the target has open are still not part of it. `/invclear` takes a block tag too (the items that carry the block ids).
 - The target's anvil, merchant and other workstation inputs cannot be read (only their placeholders are shown).
-- The `permission plugin` and `proxy` resolve strategies answer nothing. `player data` answers from `usercache.json`
-  (the last known names of players who were on), not from the save files.
-- Log lines (the server log and console outputs, and the reasons of failed reads) go to stderr, not to the server's log file.
-- The `invseeplusplus.*` wildcard cannot be checked (typed nodes have no wildcard name); a permission mod answering it is not seen.
-- A never-played player's view refuses clicks with its own text (`... nothing can be stored yet`): InvSee++ stores
-  there, which needs the offline write API.
+- The `permission plugin` resolve strategy answers nothing (GroupManager, BungeePerms and UltraPermissions are not installed); the `proxy` strategy asks BungeeCord (round 8). `player data` answers from the saved file's last known name for a UUID and from `usercache.json` for a name.
 
 ## Licence
 

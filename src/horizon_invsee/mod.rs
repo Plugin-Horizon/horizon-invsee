@@ -8,11 +8,13 @@
 //!
 //! A port of InvSee++ (LGPL-2.1, Jannyboy11): its commands, messages, defaults and log formats
 //! follow the original's source (see README.md, NOTICE and STATUS.md).
+pub mod addons;
 pub mod audit;
 pub mod click;
 pub mod config;
 pub mod mojang;
 pub mod names;
+pub mod proxy;
 pub mod template;
 
 use config::{Config, Granularity, Palette, Resolver};
@@ -132,7 +134,7 @@ pub trait Host {
     /// The players on the server.
     fn players(&self) -> Vec<Online>;
     /// `uuid`'s inventory `kind` (`native_inventory`).
-    fn inventory(&self, uuid: u128, kind: Kind) -> Result<Inv<Self::Stack>, InvError>;
+    fn inventory(&mut self, uuid: u128, kind: Kind) -> Result<Inv<Self::Stack>, InvError>;
     /// One whole stack moved, checked against `expected` (`native_move_stack`).
     fn move_stack(
         &mut self,
@@ -255,10 +257,47 @@ pub trait Host {
     fn permission_lookup(&mut self, _q: &Query) -> Option<(u128, String)> {
         None
     }
+    /// Writes a fresh player file for a UUID that never joined (`create_offline_player_data`), so the slot writes have
+    /// a file to edit. Err with the reason when the game refuses.
+    fn create_player_file(&mut self, _uuid: u128, _name: &str) -> Result<(), String> {
+        Err("the game cannot create a player file".into())
+    }
+    /// Asks the proxy (BungeeCord's `UUIDOther`) for the UUID of `name`, carried by any online player. False when there
+    /// is no proxy or nobody to carry the message.
+    fn proxy_ask(&mut self, _name: &str) -> bool {
+        false
+    }
+    /// The proxy's answer to `proxy_ask`, taken when it has come.
+    fn proxy_answer(&mut self, _name: &str) -> Option<u128> {
+        None
+    }
     /// The player file of `uuid` read for its last known name, or the player whose file has `name` (`player data
     /// save files` strategies).
     fn save_file_lookup(&mut self, _q: &Query) -> Option<(u128, String)> {
         None
+    }
+    /// Every item id (`minecraft:diamond`) of the game, for the addon commands' item names.
+    fn item_ids(&self) -> Vec<String> {
+        Vec::new()
+    }
+    /// One stack of `item` with the component patch `components` (the inside of `[...]`), vanilla's item syntax.
+    fn make_stack(&self, _item: &str, _components: Option<&str>) -> Result<Self::Stack, String> {
+        Err("the game cannot build item stacks".into())
+    }
+    /// The item ids in the item tag `tag` (`minecraft:logs`); empty for a tag nobody knows.
+    fn tag_items(&self, _tag: &str) -> Vec<String> {
+        Vec::new()
+    }
+    /// The item ids of the blocks in the block tag `tag` (`minecraft:logs` as `Tag.REGISTRY_BLOCKS` has it): the
+    /// members that have an item; empty for a tag nobody knows. `/invclear` asks it when no item tag has the name.
+    fn block_tag_items(&self, _tag: &str) -> Vec<String> {
+        Vec::new()
+    }
+    /// An event for other mods (`SpectatorInventorySaveEvent` and `SpectatorInventoryOfflineCreatedEvent` as service
+    /// callbacks): `line` is `<name>\t<spectator>\t<target>\t<target name>\t<inventory|enderchest>`. True when a
+    /// listener cancelled it (only the save event can be).
+    fn event(&mut self, _line: &str) -> bool {
+        false
     }
     /// The server's folder (where usercache.json is).
     fn server_dir(&self) -> Option<PathBuf>;
@@ -301,6 +340,10 @@ struct Pending {
     /// The resolver tried next.
     step: usize,
     lookup: Option<Lookup>,
+    /// The tick the proxy was asked at (`proxy` strategy).
+    proxy_since: Option<u64>,
+    /// What to do with the target once found.
+    op: addons::Op,
 }
 
 /// An open view.
@@ -321,6 +364,9 @@ struct Session<S> {
     /// The game's own inventory menu (`open_inventory_menu`): it follows and edits the target
     /// itself, so the mod neither refreshes nor handles its clicks (nor logs single items).
     live: bool,
+    /// The target's slots when a live view opened: what the view changed is the difference to the
+    /// slots at its close, which is what the log of a live view says.
+    baseline: Vec<Option<S>>,
     /// A drag the spectator has started.
     drag: Option<click::Drag>,
 }
@@ -579,6 +625,8 @@ pub struct InvSee<S> {
     sessions: Vec<Session<S>>,
     /// The players on, as of the last tick.
     online: Vec<Online>,
+    /// Players who joined and may have queued items (`InvSee++_Give`'s item queue): uuid, name, tick of joining.
+    joined: Vec<(u128, String, u64)>,
     /// Players who were on since the start ("logged out players cache").
     seen: Directory,
     usercache: Usercache,
@@ -612,6 +660,7 @@ impl<S: Clone + PartialEq> InvSee<S> {
             pending: Vec::new(),
             sessions: Vec::new(),
             online: Vec::new(),
+            joined: Vec::new(),
             seen: Directory::default(),
             usercache: Usercache::default(),
             server_dir: None,
@@ -675,6 +724,7 @@ impl<S: Clone + PartialEq> InvSee<S> {
         for w in ["invseeplusplusreload", "isppreload"] {
             out.push((w.to_string(), a.reload));
         }
+        out.extend(self.addon_usages());
         out
     }
 
@@ -716,6 +766,10 @@ impl<S: Clone + PartialEq> InvSee<S> {
     pub fn perform<H: Host<Stack = S>>(&mut self, host: &mut H, viewer: u128, name: &str, line: &str) -> Option<Vec<String>> {
         let mut words = line.split_whitespace();
         let word = words.next()?.to_lowercase();
+        if addons::addon_word(&word).is_some() {
+            let args: Vec<&str> = words.collect();
+            return self.addon_perform(host, viewer, name, &word, &args);
+        }
         let Some(kind) = command_kind(&word)? else {
             if !host.has_permission(viewer, "invseeplusplus.reload", self.cfg.access.reload) {
                 return Some(vec![NO_PERMISSION.into()]);
@@ -735,7 +789,7 @@ impl<S: Clone + PartialEq> InvSee<S> {
             None => Query::Name(target.to_owned()),
         };
         // One request at a time per spectator: the newest wins.
-        self.pending.retain(|p| p.viewer != viewer);
+        self.pending.retain(|p| p.viewer != viewer || p.op != addons::Op::View);
         self.pending.push(Pending {
             viewer,
             viewer_name: name.to_owned(),
@@ -744,6 +798,8 @@ impl<S: Clone + PartialEq> InvSee<S> {
             query,
             step: 0,
             lookup: None,
+            proxy_since: None,
+            op: addons::Op::View,
         });
         Some(Vec::new())
     }
@@ -761,8 +817,20 @@ impl<S: Clone + PartialEq> InvSee<S> {
         }
     }
 
+    /// A console command with the game at hand (the addon commands need item names): None when it isn't one of ours.
+    pub fn console_with<H: Host<Stack = S>>(&mut self, host: &mut H, line: &str) -> Option<Vec<String>> {
+        let mut words = line.split_whitespace();
+        let word = words.next()?.to_lowercase();
+        if addons::addon_word(&word).is_some() {
+            let args: Vec<&str> = words.collect();
+            return self.addon_perform(host, addons::CONSOLE, "CONSOLE", &word, &args);
+        }
+        self.console(line)
+    }
+
     pub fn logged_in(&mut self, uuid: u128, name: &str) {
         self.seen.add(uuid, name);
+        self.addon_joined(uuid, name);
     }
 
     pub fn logged_out(&mut self, uuid: u128, name: &str) {
@@ -781,6 +849,18 @@ impl<S: Clone + PartialEq> InvSee<S> {
         let cmd = command.trim_start_matches('/');
         let offset = command.len() - cmd.len();
         let (word, arg) = cmd.split_once(' ')?;
+        let lower = word.to_lowercase();
+        if addons::addon_word(&lower).is_some() {
+            let (node_a, node_k) = addons::addon_word(&lower)?;
+            let level = self.addon_level_pub(node_a, node_k);
+            if !host.has_permission(player, &addons::addon_node(node_a, node_k), level) {
+                return None;
+            }
+            let args: Vec<&str> = arg.split(' ').collect();
+            let names = self.addon_complete(host, &lower, &args)?;
+            let start = offset + cmd.len() - args.last().map_or(0, |a| a.len());
+            return Some((start, names));
+        }
         let kind = command_kind(&word.to_lowercase())??;
         let level = self.view_level(kind);
         // InvSee++'s completer asks only for the tab completion permission; the command's own is the tree's.
@@ -815,17 +895,28 @@ impl<S: Clone + PartialEq> InvSee<S> {
         }
         let pending = std::mem::take(&mut self.pending);
         for mut p in pending {
-            if !self.online.iter().any(|o| o.uuid == p.viewer) {
+            if p.viewer != addons::CONSOLE && !self.online.iter().any(|o| o.uuid == p.viewer) {
                 continue;
             }
             match self.resolve(host, &mut p) {
                 Resolve::Wait => self.pending.push(p),
-                Resolve::Found(uuid, name) => self.open(host, &p, uuid, name),
+                Resolve::Found(uuid, name) => match p.op {
+                    addons::Op::View => self.open(host, &p, uuid, name),
+                    _ => self.addon_found(host, p, uuid, name),
+                },
                 Resolve::NotFound => {
-                    host.tell(p.viewer, &format!("§cPlayer {} does not exist.", p.typed));
+                    let line = match p.op {
+                        addons::Op::View | addons::Op::CloneFrom { .. } | addons::Op::CloneTo { .. } => {
+                            format!("§cPlayer {} does not exist.", p.typed)
+                        }
+                        // InvSee++_Give and _Clear say so in these words.
+                        _ => format!("§cUnknown player: {}", p.typed),
+                    };
+                    self.addon_say(host, p.viewer, &line);
                 }
             }
         }
+        self.addon_queues(host);
         // Views whose spectator is gone (the close hook normally ends them first).
         let gone: Vec<usize> = (0..self.sessions.len())
             .filter(|&i| !self.online.iter().any(|o| o.uuid == self.sessions[i].viewer))
@@ -907,8 +998,28 @@ impl<S: Clone + PartialEq> InvSee<S> {
                     Query::Name(n) => self.usercache().and_then(|d| d.uuid(n)),
                     Query::Uuid(u) => self.usercache().and_then(|d| d.name(*u)).map(|n| (*u, n)),
                 }),
-                // The proxy answers a UUID lookup over the plugin channel; the game has no way to ask it yet.
-                (_, Resolver::Proxy) => None,
+                // The proxy knows a name's UUID (BungeeCord `UUIDOther`); there is no message that names a UUID.
+                (Query::Uuid(_), Resolver::Proxy) => None,
+                (Query::Name(n), Resolver::Proxy) => match p.proxy_since {
+                    None => {
+                        if host.proxy_ask(n) {
+                            p.proxy_since = Some(self.tick);
+                            return Resolve::Wait;
+                        }
+                        None
+                    }
+                    Some(since) => match host.proxy_answer(n) {
+                        Some(uuid) => {
+                            p.proxy_since = None;
+                            Some((uuid, n.clone()))
+                        }
+                        None if self.tick.saturating_sub(since) < proxy::TIMEOUT_TICKS => return Resolve::Wait,
+                        None => {
+                            p.proxy_since = None;
+                            None
+                        }
+                    },
+                },
             };
             if let Some((uuid, name)) = found {
                 return Resolve::Found(uuid, name);
@@ -983,6 +1094,10 @@ impl<S: Clone + PartialEq> InvSee<S> {
                 return;
             }
         };
+        if !is_online {
+            // `SpectatorInventoryOfflineCreatedEvent`.
+            host.event(&addons::event_line("spectator_inventory_offline_created", p.viewer, target, &name, p.kind));
+        }
         // A spectator has one view: the old one ends (and is logged) before the new opens.
         if let Some(i) = self.sessions.iter().position(|s| s.viewer == p.viewer) {
             let s = self.sessions.remove(i);
@@ -1043,6 +1158,7 @@ impl<S: Clone + PartialEq> InvSee<S> {
             taken: Vec::new(),
             given: Vec::new(),
             live,
+            baseline: if live { slots.clone() } else { Vec::new() },
             drag: None,
         });
     }
@@ -1091,6 +1207,19 @@ impl<S: Clone + PartialEq> InvSee<S> {
         };
         if self.sessions[i].live {
             return;
+        }
+        // `SpectatorInventorySaveEvent`: an edit of an offline target's file is announced first; a listener that
+        // cancels it stops the click (every click of an editor is one save here).
+        {
+            let s = &self.sessions[i];
+            let offline = !self.online.iter().any(|o| o.uuid == s.target);
+            if offline && s.viewer != s.target && !s.unknown && host.has_permission(viewer, &node(s.kind, "edit"), self.edit_level(s.kind)) {
+                let line = addons::event_line("spectator_inventory_save", viewer, s.target, &s.target_name, s.kind);
+                if host.event(&line) {
+                    self.refresh_with(host, i, true);
+                    return;
+                }
+            }
         }
         // A game that reads the spectator's cursor gets the whole of vanilla's click rules; otherwise a click
         // moves a whole stack.
@@ -1358,7 +1487,17 @@ impl<S: Clone + PartialEq> InvSee<S> {
         self.pending.clear();
     }
 
-    fn finish<H: Host<Stack = S>>(&mut self, host: &mut H, s: Session<S>) {
+    fn finish<H: Host<Stack = S>>(&mut self, host: &mut H, mut s: Session<S>) {
+        // The game ran the clicks of a live view: what changed is read from the target's slots now.
+        if s.live {
+            if let Ok(now) = host.inventory(s.target, s.kind) {
+                let (mut taken, mut given) = (Vec::new(), Vec::new());
+                for (old, new) in s.baseline.iter().zip(now.slots.iter()) {
+                    changes(&*host, old, new, &mut taken, &mut given);
+                }
+                (s.taken, s.given) = net(taken, given);
+            }
+        }
         if self.cfg.logging.granularity == Granularity::OnClose
             && (!s.taken.is_empty() || !s.given.is_empty())
         {
