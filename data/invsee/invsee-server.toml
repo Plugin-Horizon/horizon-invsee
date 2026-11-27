@@ -16,6 +16,14 @@ bypass_exempt = 5
 # Names or UUIDs whose inventory / ender chest only players of `bypass_exempt` may open.
 exempt_invsee = []
 exempt_endersee = []
+# The addon commands, one level each (plugin.yml `default: op`): /invgive, /endergive, /invclear, /enderclear,
+# /invclone, /enderclone (nodes invseeplusplus.give|clear|clone.inventory|enderchest).
+give_inventory = 1
+give_enderchest = 1
+clear_inventory = 1
+clear_enderchest = 1
+clone_inventory = 1
+clone_enderchest = 1
 
 [players]
 # Open the inventories of players who are not on the server (from their player file).
@@ -108,3 +116,22 @@ Spectator Name: <spectator_name>
 Taken         : <taken>
 Given         : <given>
 Target        : <target>"""
+
+# /invgive and /endergive (InvSee++_Give's config.yml).
+[give]
+# Give to players who are not on: true, false, "same_as_InvSee++" (the [players] value) or "same_as_InvseeAPI".
+offline_player_support = true
+# Give to players who never played here: the same four values.
+unknown_player_support = true
+# Whether the target's exemption is respected: true (bypass it), false, or "permission" (the sender's
+# bypass-exempt node decides).
+bypass_exempt = "permission"
+# When not everything fits, still keep the part that did (for a player who is not on).
+save_partial_inventories = true
+# Queue what did not fit and give it at the player's next login.
+queue_remaining_items = true
+
+# /invclear and /enderclear (InvSee++_Clear's config.yml).
+[clear]
+offline_player_support = true
+bypass_exempt = "permission"

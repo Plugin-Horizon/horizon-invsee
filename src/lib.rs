@@ -1,22 +1,23 @@
 //! invsee as an arismoko native trait mod (`mod_api`). The logic is the unchanged `horizon-invsee`
-//! crate (`core/`); this file wires its hooks and its `Host` to arismoko's API. Where arismoko has
-//! no API yet the mapping falls back and says so with a `TODO(arismoko-api: ...)`; PORT_NOTES.md
-//! lists them all.
+//! crate (`core/`); this file wires its hooks and its `Host` to the mod API.
 //!
 //! Config: `config/invsee-server.toml` (`ConfigKind::Server`, written from the default when missing,
 //! read again when it changes).
 
 pub mod horizon_invsee;
+mod cmdkit;
+pub mod snbt;
 use crate::horizon_invsee::{self as inv, Kind};
 use mod_api::{
     Command, CommandArgumentValue, CommandInvocation, CommandSource, Compound, Config, ConfigKind,
     ConfigLoadingEvent, ConfigReloadingEvent, Flow, HostSide, HostTransaction, Hooks, Identifier, ItemPlace,
     ItemResource, ItemStack, PlayerContainerCloseEvent, PlayerContainerOpenEvent, TransactionSeal,
-    MenuClickedEvent, MenuClosedEvent, MenuReplace, NodeDefault, PermissionGatherNodesEvent,
+    MenuClickedEvent, MenuClosedEvent, MenuReplace, PlayerViewExtras, PlayerViewKind, NodeDefault, PermissionGatherNodesEvent,
     PermissionLevel, PermissionNode, PermissionValueType, PlayerCommandEvent, PlayerLoggedInEvent,
     PlayerLoggedOutEvent, RegisterNodeCommandsEvent, RegisterConfigsEvent, RunModCommandEvent,
+    ModServiceCallEvent, ModServiceError, PayloadBytes, PluginMessageEvent,
     ServerHost, ServerStoppingEvent, ServerTickEvent, ServerTickPhase, Suggestion,
-    TabCompleteEvent, Tag, Text,
+    TabCompleteEvent, Tag, Text, PlayerInventoryError, PlayerInventoryKind, PlayerInventoryMove,
 };
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -36,6 +37,11 @@ const OWN_WORDS: [&str; 8] = [
     "isppreload",
 ];
 
+/// Whether `word` is a command of the mod: the view and reload words, the addon commands.
+fn is_own(word: &str) -> bool {
+    OWN_WORDS.contains(&word) || inv::addons::addon_word(word).is_some()
+}
+
 /// InvSee++'s `++` reload aliases: the engine refuses them as command words, so they are never registered;
 /// `player_command` answers them (the client sends the typed line even for an unknown command).
 const PLUS_WORDS: [&str; 2] = ["invsee++reload", "is++reload"];
@@ -52,6 +58,11 @@ static OPEN: Mutex<BTreeMap<u128, String>> = Mutex::new(BTreeMap::new());
 static DEFERRED: Mutex<Vec<Deferred>> = Mutex::new(Vec::new());
 
 /// The window id of each viewer's open view (from `open_menu`), so `set_menu_items` can refresh it.
+/// The mods that called `invsee:api` `subscribe`: their `<id>:invsee_event` service gets the spectator inventory events.
+static SUBSCRIBERS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// What the proxy answered (`UUIDOther`), by lower-case name, until the lookup takes it.
+static PROXY_ANSWERS: Mutex<BTreeMap<String, u128>> = Mutex::new(BTreeMap::new());
 static WINDOWS: Mutex<BTreeMap<u128, i32>> = Mutex::new(BTreeMap::new());
 
 enum Deferred {
@@ -144,6 +155,9 @@ fn granting(node: &str) -> Vec<&str> {
         "invseeplusplus.bypass-exempt.invsee" | "invseeplusplus.bypass-exempt.endersee" => {
             vec![node, "invseeplusplus.bypass-exempt"]
         }
+        "invseeplusplus.give.inventory" | "invseeplusplus.give.enderchest" => vec![node, "invseeplusplus.give.*"],
+        "invseeplusplus.clear.inventory" | "invseeplusplus.clear.enderchest" => vec![node, "invseeplusplus.clear.*"],
+        "invseeplusplus.clone.inventory" | "invseeplusplus.clone.enderchest" => vec![node, "invseeplusplus.clone.*"],
         _ => vec![node],
     }
 }
@@ -181,6 +195,96 @@ fn legacy_colour(code: char) -> Option<&'static str> {
     })
 }
 
+/// The words the core sorts a failed offline read by (`InvError::from_horizon`).
+fn offline_error(e: &PlayerInventoryError) -> String {
+    match e {
+        PlayerInventoryError::NoSavedPlayer => "no saved player".into(),
+        PlayerInventoryError::LoggingIn => "the player is logging in".into(),
+        PlayerInventoryError::Dead => "the player is dead".into(),
+        PlayerInventoryError::SwappedOut => "inside a player's turn".into(),
+        PlayerInventoryError::StackChanged => "the slot changed".into(),
+        PlayerInventoryError::NoRoom => "no free slot".into(),
+        other => format!("{other:?}"),
+    }
+}
+
+/// The name Paper keeps in a saved player file (`bukkit.lastKnownName`).
+fn last_known_name(data: &Compound) -> Option<String> {
+    for (k, v) in data {
+        if k.to_string_lossy() != "bukkit" {
+            continue;
+        }
+        let Tag::Compound(bukkit) = v else { continue };
+        for (bk, bv) in bukkit {
+            if let (true, Tag::String(name)) = (bk.to_string_lossy() == "lastKnownName", bv) {
+                return Some(name.to_string_lossy());
+            }
+        }
+    }
+    None
+}
+
+/// `Slot` of a saved item compound.
+fn saved_slot(tag: &Tag) -> Option<i8> {
+    let Tag::Compound(map) = tag else { return None };
+    map.iter().find_map(|(k, v)| {
+        let name = k.to_string_lossy();
+        match (&*name, v) {
+            ("Slot", Tag::Byte(b)) => Some(*b),
+            _ => None,
+        }
+    })
+}
+
+impl GameHost<'_> {
+    /// One slot of a saved player's file written (`set_offline_player_data`): the item compound with its `Slot`
+    /// (0-35 main, 100-103 armour feet to head, -106 off hand; the ender chest 0-26) replaces the one there.
+    fn write_offline_slot(&mut self, uuid: u128, kind: Kind, slot: usize, new: Option<ItemStack>) -> Result<(), String> {
+        let (key, saved): (&str, i8) = match kind {
+            Kind::Inventory => (
+                "Inventory",
+                match slot {
+                    0..=35 => slot as i8,
+                    36..=39 => (100 + slot - 36) as i8,
+                    40 => -106,
+                    _ => return Err(format!("no slot {slot}")),
+                },
+            ),
+            Kind::Ender if slot < 27 => ("EnderItems", slot as i8),
+            Kind::Ender => return Err(format!("no slot {slot}")),
+        };
+        let data = self.host.offline_player_data(uuid).ok_or("no saved player")?;
+        let entry = match &new {
+            Some(stack) => {
+                let mut c = stack.to_nbt(&*self.host).ok_or("the stack cannot be saved")?;
+                c.insert("Slot".into(), Tag::Byte(saved));
+                Some(Tag::Compound(c))
+            }
+            None => None,
+        };
+        let mut out = Compound::new();
+        let mut written = false;
+        for (k, v) in &data {
+            if k.to_string_lossy() == key {
+                if let Tag::List(items) = v {
+                    let mut list: Vec<Tag> = items.iter().filter(|t| saved_slot(t) != Some(saved)).cloned().collect();
+                    list.extend(entry.clone());
+                    out.insert(k.clone(), Tag::List(list));
+                    written = true;
+                    continue;
+                }
+            }
+            out.insert(k.clone(), v.clone());
+        }
+        if !written {
+            if let Some(e) = entry {
+                out.insert(key.into(), Tag::List(vec![e]));
+            }
+        }
+        self.host.set_offline_player_data(uuid, out).map_err(|e| format!("{e:?}"))
+    }
+}
+
 impl inv::Host for GameHost<'_> {
     type Stack = ItemStack;
 
@@ -197,12 +301,24 @@ impl inv::Host for GameHost<'_> {
             .collect()
     }
 
-    fn inventory(&self, uuid: u128, k: Kind) -> Result<inv::Inv<ItemStack>, inv::InvError> {
+    fn inventory(&mut self, uuid: u128, k: Kind) -> Result<inv::Inv<ItemStack>, inv::InvError> {
         let Some(player) = self.host.player(uuid) else {
-            // TODO(arismoko-api: player_offline_inventory): a player's file cannot be read from a mod.
-            return Err(inv::InvError::Other(
-                "offline inventories cannot be read on this server yet".into(),
-            ));
+            // A player who is not online: the game reads their save (`server_player_inventory`).
+            let kind = match k {
+                Kind::Inventory => PlayerInventoryKind::Player,
+                Kind::Ender => PlayerInventoryKind::Ender,
+            };
+            let snapshot = self
+                .host
+                .server_player_inventory(uuid, kind)
+                .map_err(|e| inv::InvError::from_horizon(&offline_error(&e)))?;
+            let mut slots = vec![None; k.size()];
+            for (i, stack) in snapshot.slots.into_iter().enumerate() {
+                if let Some(s) = slots.get_mut(i) {
+                    *s = stack;
+                }
+            }
+            return Ok(inv::Inv { slots, online: false });
         };
         // Vanilla's slot numbers (0-35 main, 36-39 armour, 40 off hand; ender chest 0-26), as the core counts.
         let read = match k {
@@ -238,7 +354,9 @@ impl inv::Host for GameHost<'_> {
         if current.as_ref() != expected {
             return Err("the slot changed".into());
         }
-        let player = self.host.player(uuid).ok_or("the player left")?;
+        let Some(player) = self.host.player(uuid) else {
+            return self.write_offline_slot(uuid, kind, slot, new).map(|()| current);
+        };
         let written = match kind {
             Kind::Inventory => player.set_inventory_slot(&mut *self.host, slot as u32, new),
             Kind::Ender => player.set_ender_chest_slot(&mut *self.host, slot as u32, new),
@@ -257,6 +375,15 @@ impl inv::Host for GameHost<'_> {
         expected: &ItemStack,
         to: (u128, Kind),
     ) -> Result<(), String> {
+        if self.host.player(from.0).is_none() || self.host.player(to.0).is_none() {
+            // A saved player's file is changed by the game, whole stack or nothing.
+            let kind = |k: Kind| match k {
+                Kind::Inventory => PlayerInventoryKind::Player,
+                Kind::Ender => PlayerInventoryKind::Ender,
+            };
+            let request = PlayerInventoryMove::new((from.0, kind(from.1), from.2 as u32), expected.clone(), (to.0, kind(to.1)));
+            return self.host.server_move_inventory_stack(&request).map_err(|e| offline_error(&e));
+        }
         let target = self.inventory(to.0, to.1).map_err(|e| format!("{e:?}"))?;
         let room = match to.1 {
             Kind::Inventory => 36,
@@ -289,9 +416,38 @@ impl inv::Host for GameHost<'_> {
         window
     }
 
-    // `open_inventory_menu` is not overridden: the core's default (None) makes it use `open_menu`.
-    // TODO(arismoko-api: menu_open_inventory): a live menu over the target's slots (drag, split,
-    // armour) is missing; the view is a snapshot taken when it opens.
+    /// The game's live view of another online player's inventory or ender chest (`open_player_view`):
+    /// its slots are the target's own, clicks run by vanilla's rules and the target's changes show on
+    /// the next tick. The game's layout is fixed (the placeholders of the template are not shown),
+    /// so `_layout` is not read. None (the mod then opens its copy) for one's own inventory, a target
+    /// who is not online and any refusal.
+    fn open_inventory_menu(
+        &mut self,
+        viewer: u128,
+        _rows: u8,
+        title: &str,
+        target: (u128, Kind),
+        _layout: &[Option<usize>],
+    ) -> Option<i32> {
+        if viewer == target.0 {
+            return None;
+        }
+        let title = text(&*self.host, title);
+        match view_request(target.1) {
+            // The inventory view is the six-row chest with the target's cursor at 45, their crafting grid at 46 to 49
+            // and its result at 50 (`SpectatorInventory`).
+            ViewRequest::Extras(extras) => self
+                .host
+                .open_player_view_extras(viewer, target.0, extras, title, MenuReplace::CloseFirst)
+                .ok()
+                .flatten(),
+            ViewRequest::Plain(kind) => self
+                .host
+                .open_player_view(viewer, target.0, kind, title, MenuReplace::CloseFirst)
+                .ok()
+                .flatten(),
+        }
+    }
 
     fn with_count(&self, stack: &ItemStack, count: u32) -> Option<ItemStack> {
         let mut split = stack.clone();
@@ -304,6 +460,33 @@ impl inv::Host for GameHost<'_> {
     fn profile_by_name(&self, name: &str) -> Option<(u128, String)> {
         let player = self.host.players().player_by_name(name)?;
         Some((player.uuid(), player.name(&*self.host)?))
+    }
+
+    fn create_player_file(&mut self, uuid: u128, name: &str) -> Result<(), String> {
+        self.host.create_offline_player_data(uuid, name).map_err(|e| format!("{e:?}"))
+    }
+
+    /// The `player data save files` strategy: the last known name in the player's saved file.
+    fn save_file_lookup(&mut self, q: &inv::Query) -> Option<(u128, String)> {
+        let inv::Query::Uuid(uuid) = q else { return None };
+        let data = self.host.offline_player_data(*uuid)?;
+        last_known_name(&data).map(|name| (*uuid, name))
+    }
+
+    /// The `proxy` strategy: BungeeCord's `UUIDOther` over the proxy channel, carried by any online player. A server
+    /// without a proxy (no `forwarding.secret`) has none to ask.
+    fn proxy_ask(&mut self, name: &str) -> bool {
+        let behind_proxy = self.server_dir().is_some_and(|d| d.join("forwarding.secret").is_file());
+        let Ok(channel) = Identifier::parse(inv::proxy::CHANNEL) else { return false };
+        if !behind_proxy || self.host.register_plugin_channel(&channel).is_err() {
+            return false;
+        }
+        let Some(carrier) = self.host.players().server_players().into_iter().next() else { return false };
+        send_plugin_message(&mut *self.host, carrier, &channel, &inv::proxy::request(name))
+    }
+
+    fn proxy_answer(&mut self, name: &str) -> Option<u128> {
+        PROXY_ANSWERS.lock().unwrap_or_else(|e| e.into_inner()).remove(&name.to_lowercase())
     }
 
     fn profile_by_uuid(&self, uuid: u128) -> Option<String> {
@@ -413,8 +596,9 @@ impl inv::Host for GameHost<'_> {
     }
 
     fn log(&mut self, line: &str) {
-        // TODO(arismoko-api: server_log): stderr only, not the server's log file.
-        eprint_line(line);
+        for l in line.lines() {
+            let _ = self.host.messages().console_log(ID, mod_api::ConsoleLevel::Info, l);
+        }
     }
 
     fn placeholder(&self, item: &str, name: &str) -> ItemStack {
@@ -489,6 +673,63 @@ impl inv::Host for GameHost<'_> {
         (stack.item().id(&*self.host), stack.count())
     }
 
+    fn item_ids(&self) -> Vec<String> {
+        self.host.item_ids().iter().map(|i| i.to_string()).collect()
+    }
+
+    /// Vanilla's item argument: the id, then `[component=value,!component]`.
+    fn make_stack(&self, item: &str, components: Option<&str>) -> Result<ItemStack, String> {
+        let unknown = || format!("Unknown item '{item}'");
+        let id = Identifier::parse(item).map_err(|_| unknown())?;
+        let key = self.host.item_key(&id).ok_or_else(unknown)?;
+        let mut stack = ItemStack::of(key);
+        if let Some(inner) = components {
+            let patch = snbt::parse_components(inner)?;
+            stack.apply_components(&patch).map_err(|e| format!("Invalid components: {e:?}"))?;
+        }
+        Ok(stack)
+    }
+
+    fn tag_items(&self, tag: &str) -> Vec<String> {
+        let Ok(id) = Identifier::parse(tag) else { return Vec::new() };
+        let tags = self.host.tags();
+        let Some(key) = tags.key(&id) else { return Vec::new() };
+        let Some(items) = tags.items(key) else { return Vec::new() };
+        items.into_iter().map(|k| k.id(&*self.host)).collect()
+    }
+
+    /// `Tag.REGISTRY_BLOCKS`: the blocks of a block tag, as the items that carry their id (a block without an item,
+    /// water or a wall banner, has nothing to clear).
+    fn block_tag_items(&self, tag: &str) -> Vec<String> {
+        let Ok(id) = Identifier::parse(tag) else { return Vec::new() };
+        let tags = self.host.tags();
+        let Some(key) = tags.key(&id) else { return Vec::new() };
+        let Some(blocks) = tags.blocks(key) else { return Vec::new() };
+        let items = self.item_ids();
+        blocks
+            .into_iter()
+            .map(|b| b.id(&*self.host))
+            .filter(|id| items.contains(id))
+            .collect()
+    }
+
+    /// The spectator inventory events, as service calls to the mods that subscribed. A reply of `cancel` cancels the
+    /// save event.
+    fn event(&mut self, line: &str) -> bool {
+        let subscribers = SUBSCRIBERS.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let mut cancelled = false;
+        for id in subscribers {
+            match self.host.commands().call_mod_service(&format!("{id}:invsee_event"), line.as_bytes()) {
+                Ok(reply) => cancelled |= reply == b"cancel",
+                Err(ModServiceError::ProviderNotLoaded) => {
+                    SUBSCRIBERS.lock().unwrap_or_else(|e| e.into_inner()).retain(|s| *s != id);
+                }
+                Err(_) => {}
+            }
+        }
+        cancelled
+    }
+
     fn server_dir(&self) -> Option<PathBuf> {
         // The server runs in its own folder (where usercache.json lies), as stage.py starts it.
         std::env::current_dir().ok()
@@ -506,12 +747,16 @@ fn usages() -> Vec<(String, u8)> {
 
 /// The plugin.yml permission node of a command word (`invseeplusplus.invsee.view` for `invsee` and its
 /// aliases, `invseeplusplus.endersee.view`, `invseeplusplus.reload` for the reload words).
-fn node_of_word(word: &str) -> &'static str {
+fn node_of_word(word: &str) -> String {
+    if let Some((addon, kind)) = inv::addons::addon_word(word) {
+        return inv::addons::addon_node(addon, kind);
+    }
     match word {
         "endersee" | "enderchestsee" | "esee" => "invseeplusplus.endersee.view",
         "invseeplusplusreload" | "isppreload" | "invsee++reload" | "is++reload" => "invseeplusplus.reload",
         _ => "invseeplusplus.invsee.view",
     }
+    .to_owned()
 }
 
 /// The typed Boolean node of a plugin.yml permission name (`invseeplusplus.reload`).
@@ -519,33 +764,76 @@ fn bool_node(name: &str) -> PermissionNode {
     PermissionNode::new(name, PermissionValueType::Boolean)
 }
 
-/// The permission nodes the core asks, with the operator level that grants each by default. The view, edit,
-/// reload and tab-complete levels are the `[access]` levels of `config/invsee-server.toml` at start (the shipped
-/// defaults without the file; changing them needs a restart). `bypass-exempt` and `exempt` default to "nobody" in
-/// InvSee++, which a Boolean node cannot express: they are declared at level 4 so a permission mod can grant them
-/// (HMOD-GAP(bypass_exempt): level-4 operators hold them by default).
-fn permission_nodes() -> Vec<(&'static str, i32)> {
+/// One declared node: its default (`None` is plugin.yml's `default: false`, nobody, operators included) and the
+/// nodes holding it grants (plugin.yml `children`).
+struct Declared {
+    name: &'static str,
+    level: Option<i32>,
+    children: &'static [&'static str],
+}
+
+/// The permission nodes of plugin.yml. The view, edit, reload and tab-complete levels are the `[access]` levels of
+/// `config/invsee-server.toml` at start (the shipped defaults without the file; changing them needs a restart).
+fn permission_nodes() -> Vec<Declared> {
     let access = std::fs::read_to_string(Path::new("config").join("invsee-server.toml"))
         .ok()
         .and_then(|t| inv::config::Config::parse(&t).ok())
         .map(|c| c.access)
         .unwrap_or_default();
+    let node = |name, level: Option<i32>, children| Declared { name, level, children };
     vec![
-        ("invseeplusplus.invsee.view", access.invsee_view as i32),
-        ("invseeplusplus.invsee.edit", access.invsee_edit as i32),
-        ("invseeplusplus.endersee.view", access.endersee_view as i32),
-        ("invseeplusplus.endersee.edit", access.endersee_edit as i32),
-        ("invseeplusplus.reload", access.reload as i32),
-        ("invseeplusplus.tabcomplete", access.invsee_view.min(access.endersee_view) as i32),
-        ("invseeplusplus.bypass-exempt.invsee", 4),
-        ("invseeplusplus.bypass-exempt.endersee", 4),
-        ("invseeplusplus.exempt.invsee", 4),
-        ("invseeplusplus.exempt.endersee", 4),
-        // The aggregate nodes of plugin.yml: holding one grants its children (see `granting`).
-        ("invseeplusplus.view", access.invsee_view.min(access.endersee_view) as i32),
-        ("invseeplusplus.edit", access.invsee_edit.min(access.endersee_edit) as i32),
-        ("invseeplusplus.exempt", 4),
-        ("invseeplusplus.bypass-exempt", 4),
+        node(
+            "invseeplusplus.*",
+            None,
+            &[
+                "invseeplusplus.invsee.edit",
+                "invseeplusplus.endersee.edit",
+                "invseeplusplus.exempt.invsee",
+                "invseeplusplus.exempt.endersee",
+                "invseeplusplus.bypass-exempt.invsee",
+                "invseeplusplus.bypass-exempt.endersee",
+                "invseeplusplus.tabcomplete",
+                "invseeplusplus.reload",
+                "invseeplusplus.give.*",
+                "invseeplusplus.clear.*",
+                "invseeplusplus.clone.*",
+            ],
+        ),
+        node(
+            "invseeplusplus.view",
+            Some(access.invsee_view.min(access.endersee_view) as i32),
+            &["invseeplusplus.invsee.view", "invseeplusplus.endersee.view"],
+        ),
+        node(
+            "invseeplusplus.edit",
+            Some(access.invsee_edit.min(access.endersee_edit) as i32),
+            &["invseeplusplus.invsee.edit", "invseeplusplus.endersee.edit"],
+        ),
+        node("invseeplusplus.exempt", None, &["invseeplusplus.exempt.invsee", "invseeplusplus.exempt.endersee"]),
+        node(
+            "invseeplusplus.bypass-exempt",
+            None,
+            &["invseeplusplus.bypass-exempt.invsee", "invseeplusplus.bypass-exempt.endersee"],
+        ),
+        node("invseeplusplus.invsee.view", Some(access.invsee_view as i32), &["invseeplusplus.tabcomplete"]),
+        node("invseeplusplus.invsee.edit", Some(access.invsee_edit as i32), &["invseeplusplus.invsee.view"]),
+        node("invseeplusplus.endersee.view", Some(access.endersee_view as i32), &["invseeplusplus.tabcomplete"]),
+        node("invseeplusplus.endersee.edit", Some(access.endersee_edit as i32), &["invseeplusplus.endersee.view"]),
+        node("invseeplusplus.tabcomplete", Some(access.invsee_view.min(access.endersee_view) as i32), &[]),
+        node("invseeplusplus.reload", Some(access.reload as i32), &[]),
+        node("invseeplusplus.give.*", None, &["invseeplusplus.give.inventory", "invseeplusplus.give.enderchest"]),
+        node("invseeplusplus.give.inventory", Some(access.give_inventory as i32), &[]),
+        node("invseeplusplus.give.enderchest", Some(access.give_enderchest as i32), &[]),
+        node("invseeplusplus.clear.*", None, &["invseeplusplus.clear.inventory", "invseeplusplus.clear.enderchest"]),
+        node("invseeplusplus.clear.inventory", Some(access.clear_inventory as i32), &[]),
+        node("invseeplusplus.clear.enderchest", Some(access.clear_enderchest as i32), &[]),
+        node("invseeplusplus.clone.*", None, &["invseeplusplus.clone.inventory", "invseeplusplus.clone.enderchest"]),
+        node("invseeplusplus.clone.inventory", Some(access.clone_inventory as i32), &[]),
+        node("invseeplusplus.clone.enderchest", Some(access.clone_enderchest as i32), &[]),
+        node("invseeplusplus.exempt.invsee", None, &[]),
+        node("invseeplusplus.exempt.endersee", None, &[]),
+        node("invseeplusplus.bypass-exempt.invsee", None, &[]),
+        node("invseeplusplus.bypass-exempt.endersee", None, &[]),
     ]
 }
 
@@ -569,16 +857,17 @@ fn perform_try(host: &mut dyn ServerHost, uuid: u128, name: &str, line: &str) ->
 }
 
 /// The console's command line; the core's lines, or None when it is not ours or the state is in use.
-fn console_try(line: &str) -> Option<Option<Vec<String>>> {
-    with(|m| m.console(line))
+fn console_try(host: &mut dyn ServerHost, line: &str) -> Option<Option<Vec<String>>> {
+    let mut game = GameHost::new(host);
+    with(|m| m.console_with(&mut game, line))
 }
 
 /// The command as the core reads a line: its literals, then its text and word arguments.
 fn command_line(command: &CommandInvocation) -> String {
     let mut words = command.literals.clone();
     for argument in &command.arguments {
-        if let CommandArgumentValue::String(word) = &argument.value {
-            words.push(word.clone());
+        if let Some(word) = cmdkit::value_text(&argument.value) {
+            words.push(word);
         }
     }
     words.join(" ")
@@ -597,7 +886,7 @@ fn tick(game: &mut GameHost<'_>) {
                     }
                 }
                 None => {
-                    for l in console_try(line).flatten().unwrap_or_default() {
+                    for l in console_try(&mut *game.host, line).flatten().unwrap_or_default() {
                         eprint_line(&l);
                     }
                 }
@@ -639,28 +928,37 @@ impl Hooks for Mod {
         }
     }
 
+    fn register(&self, registrar: &mut dyn mod_api::Registrar, _: &mod_api::RegistrationContext) {
+        cmdkit::register(registrar);
+    }
+
     fn register_node_commands(&self, _: &mut dyn ServerHost, event: &mut RegisterNodeCommandsEvent<'_>) {
         for (usage, level) in usages() {
             // The core writes `word?` so the client asks for names; arismoko's word is plain `word`.
-            let usage = usage.replace("word?", "word");
+            let usage = cmdkit::ask(&usage.replace("word?", "word"), ID);
             // The plugin.yml node of the word: a permissions mod's answer decides who sees the usage, the level
             // only when none answers (as Bukkit's `permission:`). Others get Bukkit's text from `player_command`.
             let word = usage.split_whitespace().next().unwrap_or_default();
             event
                 .commands
-                .push(Command::op(&usage, level).with_node(&bool_node(node_of_word(word))));
+                .push(Command::op(&usage, level).with_node(&bool_node(&node_of_word(word))));
         }
     }
 
     fn permission_gather_nodes(&self, event: &mut PermissionGatherNodesEvent<'_>) {
-        for (node, level) in permission_nodes() {
-            let _ = event.nodes.add(bool_node(node), NodeDefault::Level(PermissionLevel::from_level(level)));
+        for d in permission_nodes() {
+            let default = match d.level {
+                Some(level) => NodeDefault::Level(PermissionLevel::from_level(level)),
+                None => NodeDefault::Nobody,
+            };
+            let children: Vec<PermissionNode> = d.children.iter().map(|c| bool_node(c)).collect();
+            let _ = event.nodes.add_with_children(bool_node(d.name), default, &children);
         }
     }
 
-    /// Bukkit's text for a player without the command's permission (plugin.yml `permission:`, red).
-    /// The usage is hidden from such a player (`register_commands`), so the typed command would read
-    /// "unknown command" without this.
+    /// A player without the command's permission: the usage is hidden from them (`register_node_commands`), so the typed
+    /// command reads "unknown command", as on Paper 26.3 (it shows no "I'm sorry" text either). The `++` reload words
+    /// are not registered (the engine refuses them), so a permitted player's line is answered here.
     fn player_command(&self, host: &mut dyn ServerHost, event: &mut PlayerCommandEvent<'_>) -> Flow {
         let root = event
             .command
@@ -670,36 +968,48 @@ impl Hooks for Mod {
             .unwrap_or_default()
             .to_lowercase();
         if PLUS_WORDS.contains(&root.as_str()) {
-            // Same node as `isppreload`; permitted players get the reload, others Bukkit's text.
             let uuid = event.player;
+            if !has(host, uuid, "invseeplusplus.reload") {
+                return Flow::Continue;
+            }
             let name = host.player(uuid).and_then(|p| p.name(&*host)).unwrap_or_default();
-            let allowed = has(host, uuid, "invseeplusplus.reload");
             event.cancelled = true;
-            if allowed {
-                for l in perform(host, uuid, &name, "invseeplusplusreload").unwrap_or_default() {
-                    let line = text(&*host, &l);
-                    event.replies.push(line);
-                }
-            } else {
-                event.replies.push(Text::literal(
-                    "\u{a7}cI'm sorry, but you do not have permission to perform this command. Please contact the server administrators if you believe that this is in error.",
-                ));
+            for l in perform(host, uuid, &name, "invseeplusplusreload").unwrap_or_default() {
+                let line = text(&*host, &l);
+                event.replies.push(line);
             }
             return Flow::Cancel;
         }
-        if !OWN_WORDS.contains(&root.as_str()) {
-            return Flow::Continue;
+        Flow::Continue
+    }
+
+    /// The service `invsee:api`: `subscribe <mod id>` / `unsubscribe <mod id>` for the spectator inventory events (the
+    /// mod's own service `<id>:invsee_event` is then called with `<event>\t<spectator>\t<target>\t<name>\t<view>`;
+    /// the save event is cancelled by the reply `cancel`), `version`.
+    fn mod_service_call(&self, _: &mut dyn ServerHost, event: &mut ModServiceCallEvent<'_>) -> Option<PayloadBytes> {
+        if event.service != "invsee:api" {
+            return None;
         }
-        let uuid = event.player;
-        let allowed = has(host, uuid, node_of_word(&root));
-        if allowed {
-            return Flow::Continue;
-        }
-        event.cancelled = true;
-        event.replies.push(Text::literal(
-            "\u{a7}cI'm sorry, but you do not have permission to perform this command. Please contact the server administrators if you believe that this is in error.",
-        ));
-        Flow::Cancel
+        let text = std::str::from_utf8(&event.payload.0).ok()?;
+        let mut parts = text.split('\t');
+        let reply = match parts.next()? {
+            "version" => "0".to_owned(),
+            "subscribe" => {
+                let id = parts.next()?;
+                let mut subs = SUBSCRIBERS.lock().unwrap_or_else(|e| e.into_inner());
+                if !subs.iter().any(|s| s == id) {
+                    subs.push(id.to_owned());
+                }
+                "true".to_owned()
+            }
+            "unsubscribe" => {
+                let id = parts.next()?;
+                SUBSCRIBERS.lock().unwrap_or_else(|e| e.into_inner()).retain(|s| s != id);
+                "true".to_owned()
+            }
+            _ => return None,
+        };
+        Some(PayloadBytes(reply.into_bytes()))
     }
 
     fn run_mod_command(&self, host: &mut dyn ServerHost, event: &mut RunModCommandEvent<'_>) -> Flow {
@@ -707,7 +1017,7 @@ impl Hooks for Mod {
             .command
             .literals
             .first()
-            .is_some_and(|w| OWN_WORDS.contains(&w.as_str()));
+            .is_some_and(|w| is_own(w.as_str()));
         if !ours {
             return Flow::Continue;
         }
@@ -725,7 +1035,7 @@ impl Hooks for Mod {
                 answer
             }
             CommandSource::Console { .. } => {
-                let answer = console_try(&line);
+                let answer = console_try(host, &line);
                 if answer.is_none() {
                     defer(Deferred::Command(None, line));
                     return Flow::Cancel;
@@ -763,6 +1073,16 @@ impl Hooks for Mod {
         if matches!(event.phase, ServerTickPhase::ServerTickEnd { .. }) {
             let mut game = GameHost::new(host);
             tick(&mut game);
+        }
+    }
+
+    /// The proxy's `UUIDOther` reply on the channel `proxy_ask` registered.
+    fn plugin_message(&self, _: &mut dyn ServerHost, event: &mut PluginMessageEvent<'_>) {
+        if event.channel.to_string() != inv::proxy::CHANNEL {
+            return;
+        }
+        if let Some((name, uuid)) = inv::proxy::parse_reply(event.data) {
+            PROXY_ANSWERS.lock().unwrap_or_else(|e| e.into_inner()).insert(name.to_lowercase(), uuid);
         }
     }
 
@@ -809,4 +1129,46 @@ impl Hooks for Mod {
         let mut game = GameHost::new(host);
         with(|m| m.stopping(&mut game));
     }
+}
+
+/// Which game view a spectator's inventory kind opens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ViewRequest {
+    Plain(PlayerViewKind),
+    Extras(PlayerViewExtras),
+}
+
+fn view_request(kind: Kind) -> ViewRequest {
+    match kind {
+        Kind::Inventory => ViewRequest::Extras(PlayerViewExtras::CursorAndCrafting),
+        Kind::Ender => ViewRequest::Plain(PlayerViewKind::EnderChest),
+    }
+}
+
+#[cfg(test)]
+mod tree_tests {
+    use super::*;
+
+    #[test]
+    fn the_commands_of_the_plugin_yml_ask_the_server_for_names() {
+        let asked = cmdkit::ask(&"invsee [target:word?]".replace("word?", "word"), ID);
+        assert_eq!(asked, "invsee [target:invsee:word]");
+        assert_eq!(cmdkit::ask("invgive <target:word> <args:text>", ID), "invgive <target:invsee:word> <args:invsee:text>");
+    }
+}
+
+#[cfg(test)]
+mod glue_tests {
+    use super::*;
+
+    #[test]
+    fn the_inventory_view_shows_cursor_and_crafting_and_the_ender_chest_stays_plain() {
+        assert_eq!(view_request(Kind::Inventory), ViewRequest::Extras(PlayerViewExtras::CursorAndCrafting));
+        assert_eq!(view_request(Kind::Ender), ViewRequest::Plain(PlayerViewKind::EnderChest));
+    }
+}
+
+/// The one place that sends a plugin message (`PlayerRef::send_plugin_message` once the engine exposes it to servers).
+fn send_plugin_message(host: &mut dyn ServerHost, carrier: mod_api::PlayerRef, channel: &Identifier, data: &[u8]) -> bool {
+    carrier.send_plugin_message(host, channel, data).is_ok()
 }
